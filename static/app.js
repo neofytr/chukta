@@ -52,15 +52,49 @@ function h(tag, props, ...kids) {
 function icon(name, size = 24, fill = false) {
   return h("span", { class: "ms" + (fill ? " fill" : ""), style: { fontSize: size + "px" }, "aria-hidden": "true" }, String.fromCodePoint(SYM[ICONS[name]] || SYM.info));
 }
+const POLAR = {
+  circle: () => 1, soft: a => 1 + .07 * Math.cos(5 * a), cookie: a => 1 + .1 * Math.cos(9 * a), clover: a => 1 + .22 * Math.cos(4 * a), burst: a => 1 + .17 * Math.cos(12 * a),
+  pebble: a => 1 + .09 * Math.cos(2 * a + 1) + .05 * Math.cos(3 * a), tri: a => 1 + .17 * Math.cos(3 * a + Math.PI / 2), gem: a => 1 + .1 * Math.cos(5 * a + Math.PI / 2), hexa: a => 1 + .06 * Math.cos(6 * a),
+  sunny: a => 1 + .08 * Math.cos(8 * a), flower: a => .72 + .28 * Math.abs(Math.cos(3 * a)), puffy: a => 1 + .12 * Math.cos(6 * a) + .03 * Math.cos(12 * a), egg: a => 1 + .11 * Math.sin(a) + .03 * Math.cos(2 * a),
+};
 function shape(kind) {
-  const pts = [], n = 120;
-  const radius = { circle: () => 1, soft: a => .93 + .07 * Math.cos(5 * a), cookie: a => .9 + .1 * Math.cos(9 * a), clover: a => .8 + .2 * Math.cos(4 * a), burst: a => .84 + .16 * Math.cos(12 * a), pebble: a => .9 + .07 * Math.cos(3 * a + 1) + .03 * Math.cos(5 * a) }[kind];
-  for (let i = 0; i < n; i++) { const a = i / n * Math.PI * 2, r = radius(a) * 50; pts.push(`${(50 + r * Math.cos(a)).toFixed(2)}% ${(50 + r * Math.sin(a)).toFixed(2)}%`); }
-  return `polygon(${pts.join(",")})`;
+  const radius = POLAR[kind] || POLAR.circle, n = 120, rs = Array.from({ length: n }, (_, i) => radius(i / n * Math.PI * 2)), max = Math.max(...rs);
+  return `polygon(${rs.map((r, i) => { const a = i / n * Math.PI * 2, l = r / max * 50; return `${(50 + l * Math.cos(a)).toFixed(2)}% ${(50 + l * Math.sin(a)).toFixed(2)}%`; }).join(",")})`;
+}
+const FAMILY = ["cookie", "clover", "flower", "gem", "sunny", "tri", "puffy", "egg", "hexa", "pebble"];
+const hashOf = text => [...String(text)].reduce((n, c) => (n * 31 + c.codePointAt(0)) >>> 0, 7);
+const shapeFor = text => shape(FAMILY[hashOf(text) % FAMILY.length]);
+const STATUS_SHAPE = { pass: "sunny", fail: "burst", unverified: "gem", info: "clover", POSTED: "sunny", HELD: "gem", REJECTED: "pebble" };
+function wavePath(width, base, amp, cycles, phase, close) {
+  let d = `M0 ${(base + amp * Math.sin(phase)).toFixed(1)}`;
+  for (let x = 24; x <= width; x += 24) d += ` L${x} ${(base + amp * Math.sin(x / width * cycles * Math.PI * 2 + phase)).toFixed(1)}`;
+  return close ? d + ` L${width} ${close} L0 ${close} Z` : d;
+}
+function svgEl(tag, attrs) { const e = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; }
+function flowField() {
+  const wrap = h("div", { class: "flow", "aria-hidden": "true" });
+  [[{ base: 250, amp: 70, cycles: 4, phase: .4, close: 910 }, { base: 300, amp: 44, cycles: 6, phase: 2, line: true }, { base: 345, amp: 52, cycles: 4, phase: 2.6, line: true }],
+   [{ base: 640, amp: 86, cycles: 2, phase: 1.3, close: 910 }, { base: 590, amp: 58, cycles: 4, phase: 4.1, line: true }, { base: 700, amp: 40, cycles: 6, phase: .7, line: true }],
+   [{ base: 120, amp: 38, cycles: 6, phase: 3, line: true }, { base: 470, amp: 64, cycles: 2, phase: 5, line: true }, { base: 800, amp: 34, cycles: 8, phase: 1, line: true }]].forEach((layer, n) => {
+    const svg = svgEl("svg", { viewBox: "0 0 2880 900", preserveAspectRatio: "none", class: "flow-" + n });
+    for (const w of layer) svg.append(svgEl("path", { d: wavePath(2880, w.base, w.amp, w.cycles, w.phase, w.close), class: w.line ? "ln" : "rb" }));
+    wrap.append(svg);
+  });
+  document.body.prepend(wrap);
+}
+function waveBar(parts) {
+  const total = parts.reduce((n, p) => n + p[1], 0), svg = svgEl("svg", { class: "wbar", viewBox: "0 0 1000 22", preserveAspectRatio: "none", role: "img", "aria-label": parts.map(p => `${p[1]} ${p[2]}`).join(", ") });
+  let x = 8; const gap = 22, usable = 984 - gap * (parts.length - 1);
+  for (const p of parts) {
+    const w = Math.max(18, usable * p[1] / total); let d = "";
+    for (let t = 0; t <= w; t += 6) d += `${t ? " L" : "M"}${(x + t).toFixed(1)} ${(11 + 5 * Math.sin((x + t) / 21)).toFixed(2)}`;
+    svg.append(svgEl("path", { d, class: "w-" + p[0] })); x += w + gap;
+  }
+  return svg;
 }
 const shaped = (cls, kind, ...kids) => h("span", { class: cls, style: { clipPath: shape(kind) } }, ...kids);
 const tag = (key, map = STATES) => h("span", { class: "tag " + key }, icon((map[key] || [key, "info"])[1], 15), (map[key] || [key])[0]);
-const avatar = (name, state) => h("span", { class: "avw" }, h("span", { class: "av" }, name[0].toUpperCase()), h("span", { class: "pip " + state, title: (STATES[state] || [state])[0] }, icon((STATES[state] || [])[1] || "info", 12, true)));
+const avatar = (name, state) => h("span", { class: "avw" }, h("span", { class: "av t" + hashOf(name) % 4, style: { clipPath: shapeFor(name) } }, name[0].toUpperCase()), h("span", { class: "pip " + state, title: (STATES[state] || [state])[0] }, icon((STATES[state] || [])[1] || "info", 12, true)));
 function money(text, key) {
   const m = /^(.*)(\.\d\d)$/.exec(text || "");
   if (!m) return h("span", { class: "amount missing" }, "Amount missing");
@@ -154,7 +188,7 @@ function trap(el, onClose) {
 }
 document.addEventListener("pointerdown", e => {
   const host = e.target.closest?.(".btn,.chip,.fab,.icon-btn,.row,.li");
-  if (!host || host.disabled || reduced.matches) return;
+  if (!host || host.disabled || reduced.matches || host.matches('.list-pane .row[aria-current="true"]')) return;
   const box = host.getBoundingClientRect(), size = Math.max(box.width, box.height) * 2.2;
   const dot = h("span", { class: "ripple", style: { width: size + "px", height: size + "px", left: e.clientX - box.left - size / 2 + "px", top: e.clientY - box.top - size / 2 + "px" } });
   host.append(dot); setTimeout(() => dot.remove(), 560);
@@ -248,7 +282,7 @@ function morphing(el) {
   el.animate([{ transform: "rotate(0)" }, { transform: "rotate(360deg)" }], { duration: 6400, iterations: Infinity });
   return el;
 }
-const tile = (ic, title, text, end) => h("div", { class: "tile" }, h("span", { class: "sh" }, icon(ic, 22)), h("div", {}, h("b", {}, title), h("div", { class: "body-s" }, text)), end || "");
+const tile = (ic, title, text, end) => h("div", { class: "tile" }, h("span", { class: "sh", style: { clipPath: shapeFor(title) } }, icon(ic, 22)), h("div", {}, h("b", {}, title), h("div", { class: "body-s" }, text)), end || "");
 function composer() {
   if (draft === null) draft = S.sample_request;
   const pasted = h("textarea", { class: "input mono", id: "pasteText", rows: 6, "aria-label": "Invoice text", placeholder: "Paste invoices or emails. Put a line with only --- between them. Fictional data only." });
@@ -305,7 +339,7 @@ function heroCard(busy) {
   }
   busyMorph = null;
   const parts = [["s", count + c.PAID, "Cleared"], ["w", c.HELD, "Held"], ["e", c.BLOCKED, "Blocked"], ["n", c.REJECTED, "Rejected"]].filter(p => p[1]);
-  const bar = S.invoices.length ? [h("div", { class: "segbar", role: "img", "aria-label": parts.map(p => `${p[1]} ${p[2]}`).join(", ") }, parts.map(p => h("i", { class: p[0], style: { flexGrow: p[1] } }))),
+  const bar = S.invoices.length ? [waveBar(parts),
     h("div", { class: "legend" }, parts.map(p => h("span", {}, h("i", { class: "segbar-dot", style: { background: { s: "var(--md-primary)", w: "var(--md-warning)", e: "var(--md-error)", n: "var(--md-outline)" }[p[0]] } }), h("b", {}, String(p[1])), p[2])))] : null;
   const review = ex ? h("a", { class: "btn tonal", href: "#/review", onclick: () => { filter = "needs"; } }, `Review ${ex}`) : null;
   if (c.PAID && !count) return h("section", { class: "hero " + (ex ? "" : "good") }, shaped("stamp", "cookie", icon("check", 34)),
@@ -417,7 +451,7 @@ const more = (title, body) => h("details", { class: "fold" }, h("summary", {}, t
 function evidenceRow(d, f) {
   const [label, ic] = CHECKS[f.check_name] || [f.check_name, "info"];
   return h("button", { class: "li", onclick: () => openRecord(d.id, f.check_name), "aria-haspopup": "dialog" },
-    h("span", { class: "sh " + f.status }, icon(ic, 20)),
+    h("span", { class: "sh " + f.status, style: { clipPath: shape(STATUS_SHAPE[f.status] || "soft") } }, icon(ic, 20)),
     h("span", {}, h("strong", {}, label), h("span", { class: "what" }, human(f.detail)), h("span", { class: "src" }, `${(STATUS[f.status] || [f.status])[0]} · ${sourceLabel(f.source)} · ${day(f.retrieved_at)}`), h("span", { class: "sr" }, "Open record")),
     icon("chevron", 20));
 }
@@ -677,7 +711,7 @@ async function renderBank() {
 function lineRow(l) {
   const payee = h("input", { class: "input", placeholder: "Payee", "aria-label": "Payee" }), account = h("input", { class: "input", placeholder: "Account", "aria-label": "Account" }), note = h("input", { class: "input", placeholder: "What confirmed this?", "aria-label": "Note" });
   return h("div", { class: "line" },
-    h("span", { class: "sh " + l.status }, icon((STATUS[l.status] || [])[1] || "info", 18)),
+    h("span", { class: "sh " + l.status, style: { clipPath: shape(STATUS_SHAPE[l.status] || "soft") } }, icon((STATUS[l.status] || [])[1] || "info", 18)),
     h("div", {}, h("div", { class: "title-s" }, l.narration), h("div", { class: "body-s" }, day(l.txn_date))),
     h("div", { class: "pay" }, l.payee ? h("div", {}, h("b", {}, l.payee), ` → ${l.account}`) : null, h("div", { class: "body-s" }, human(l.reason)), h("div", { class: "label", style: { fontWeight: 400, overflowWrap: "anywhere" } }, `${sourceLabel(l.source)} · ${day(l.retrieved_at)}`)),
     h("div", { style: { textAlign: "right" } }, h("div", { class: "num", style: { fontWeight: 600 } }, l.amount), h("div", { style: { marginTop: "4px" } }, tag(l.status, STATUS))),
@@ -717,7 +751,7 @@ async function renderBooks() {
 const auditTabs = () => h("nav", { class: "tabs", "aria-label": "Audit views" }, [["", "Run sheet"], ["drills", "Break it"], ["ledger", "Ledger"]].map(([id, label]) =>
   h("a", { href: "#/audit" + (id ? "/" + id : ""), "aria-current": (route[1] || "") === id ? "page" : null }, label)));
 const auditPage = (kind, ...body) => mount("audit-" + kind, h("div", { class: "page" }, appbar("Audit", null, shortClient()), auditTabs(), ...body));
-const exportRow = (href, ic, title, text) => h("a", { class: "export", href, download: "" }, h("span", { class: "sh" }, icon(ic, 22)), h("span", {}, h("b", {}, title), h("span", { class: "body-s" }, text)), icon("download", 22));
+const exportRow = (href, ic, title, text) => h("a", { class: "export", href, download: "" }, h("span", { class: "sh", style: { clipPath: shapeFor(title) } }, icon(ic, 22)), h("span", {}, h("b", {}, title), h("span", { class: "body-s" }, text)), icon("download", 22));
 const nil = amount => amount === "₹0.00" ? "Nil" : amount;
 const stat = (a, b, c) => h("div", { class: "stat" }, h("span", {}, a), h("b", {}, b), h("small", {}, c));
 const SOURCE_NAMES = { crustdata: "Crustdata", ifsc: "IFSC registry", model: "Model (DeepSeek)", razorpay_test: "Razorpay test mode" };
@@ -738,7 +772,7 @@ async function renderAudit() {
   auditPage("sheet",
     h("section", { class: "sheet-doc" },
       h("div", { class: "doc-head" }, h("div", {}, h("h2", { class: "headline" }, "Payment run sheet"), h("p", { class: "body-s" }, `${S.client} · ${longDate()}`), h("p", { class: "body-s" }, `Signed by ${signers}`)),
-        h("div", { class: "bar-end" }, h("span", { class: "tag " + (d.ok ? "pass" : "fail") }, icon(d.ok ? "verified" : "warn", 16), d.ok ? "Replay clean" : "Replay failed"),
+        d.ok && d.lines.every(l => l.state === "PAID") ? h("div", { class: "rubber", "aria-hidden": "true" }, "Issued once") : null, h("div", { class: "bar-end" }, h("span", { class: "tag " + (d.ok ? "pass" : "fail") }, icon(d.ok ? "verified" : "warn", 16), d.ok ? "Replay clean" : "Replay failed"),
           h("button", { class: "icon-btn no-print", "aria-label": "Check again", title: "Check again", onclick: check }, icon("refresh")), h("button", { class: "icon-btn no-print", "aria-label": "Print", title: "Print", onclick: () => print() }, icon("print")))),
       d.ok ? null : h("p", { style: { color: "var(--md-error)", marginBottom: "12px" } }, d.problems[0]),
       h("div", { class: "table-wrap" }, h("table", { class: "table" },
@@ -770,7 +804,7 @@ function renderDrills() {
       h("div", { class: "sub", style: { maxWidth: "620px" } }, "Runs the real decision and payment code on a private copy of the sample books. Your books, credits and Razorpay are not touched."),
       h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: drillBusy, onclick: run }, icon("play", 22), drillBusy ? "Running" : r ? "Run again" : "Run all attacks"))),
     r ? h("div", { class: "group" }, r.drills.map((x, i) => h("div", { class: "drill" + (x.held ? "" : " bad"), style: { animationDelay: `${i * 80}ms` } },
-      shaped("sh", x.held ? "cookie" : "burst", icon(x.held ? "check" : "x", 22)), h("div", {}, h("b", {}, x.attack), h("div", { class: "body-s" }, x.outcome)), h("span", { class: "tag " + (x.held ? "pass" : "fail") }, icon(x.held ? "check" : "x", 15), x.held ? "Stopped" : "Failed")))) : null);
+      shaped("sh", x.held ? FAMILY[i % FAMILY.length] : "burst", icon(x.held ? "check" : "x", 22)), h("div", {}, h("b", {}, x.attack), h("div", { class: "body-s" }, x.outcome)), h("span", { class: "tag " + (x.held ? "pass" : "fail") }, icon(x.held ? "check" : "x", 15), x.held ? "Stopped" : "Failed")))) : null);
 }
 async function renderLedger() {
   const d = await get("/api/ledger").catch(() => null);
@@ -859,5 +893,7 @@ async function tick() {
   pollTimer = setTimeout(tick, S?.job?.running ? 450 : 3000);
 }
 document.documentElement.style.setProperty("--cookie", shape("cookie"));
+document.documentElement.style.setProperty("--clover", shape("puffy"));
+flowField();
 onRoute();
 tick();
