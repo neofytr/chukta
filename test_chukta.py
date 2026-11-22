@@ -800,6 +800,12 @@ _src = Sources(_db, "close", keys=["k"], transport=recorded, sleep=lambda s: Non
 _first = ingest(_db, CLIENT, BATCH[0][1], parse); _twin = ingest(_db, CLIENT, BATCH[6][1], parse); process(_db, _src, AS_OF)
 _pack = close_payload(_db, CLIENT, "2026-10", AS_OF)
 assert _pack["totals"]["invoiced"] == _pack["totals"]["duplicates"] == "₹9,440.00", "a suspected duplicate must not be counted as a second debt"
+_over = connect(":memory:"); seed(_over)
+_over_src = Sources(_over, "po", keys=["k"], transport=recorded, sleep=lambda s: None)
+for _text in (BATCH[0][1], BATCH[9][1], BATCH[0][1].replace("MG-5521", "MG-7777")):
+    _last = ingest(_over, CLIENT, _text, parse)
+process(_over, _over_src, AS_OF)
+assert "already exceed by ₹3,040.00" in _over.execute("SELECT detail FROM findings WHERE invoice_id=? AND check_name='po'", (_last,)).fetchone()[0], "an overrun PO must not read as money left"
 from chukta.brief import client_brief
 assert "₹9,440.00" in client_brief(_db, CLIENT)["text"] and "₹9,440.00" in client_brief(_db, CLIENT, "hi")["text"], "the brief quotes the books in both languages"
 from chukta.radar import _demo as radar_check

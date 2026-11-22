@@ -17,8 +17,11 @@ flowchart TB
     PO[("Purchase orders")]
     B2B[("GSTR-2B")]
     IFSC["IFSC registry, live"]
-    CD["Crustdata Identify, live"]
+    CD["Crustdata Identify and Enrich, live"]
+    DNS["Public DNS and RDAP, live"]
   end
+  DNS --> RADAR["Imposter Radar<br/>finds lookalike vendor domains first"]
+  RADAR --> CHECKS
   REC --> CHECKS["Evidence checks<br/>each cites source, field and date"]
   CHECKS --> TAX["TDS draft and MSME deadline"]
   TAX --> GATE{"Fixed policy"}
@@ -31,7 +34,9 @@ flowchart TB
   READY --> PERSON["Reviewer signs<br/>payee and amount are frozen"]
   PERSON --> PAY["Payment step<br/>one key per vendor invoice"]
   PAY --> RZP["Razorpay test mode<br/>rejects a repeated reference"]
-  PAY --> OUT["Bank file, Tally vouchers, audit replay"]
+  PAY --> OUT["Run sheet, bank file, Tally vouchers, audit replay"]
+  PAY --> RCPT["Receipt with a proof code<br/>test inbox only"]
+  OUT --> CLOSE["Month-end close<br/>a person signs"]
   STMT["Bank statement lines"] --> POST{"Issued payment, or firm rule<br/>confirmed by company domain?"}
   POST -->|"yes"| BOOK["Posted to payee and account"]
   POST -->|"duplicate or unproven"| HOLDL["Held: I can't verify"]

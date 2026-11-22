@@ -656,7 +656,8 @@ def run_checks(db, src, inv, as_of=None):
                               "check_name='duplicate' AND status='fail')", (client, f["po"], inv["id"])).fetchone()[0]
             left = po["amount_paise"] - used
             ok = inv["amount_paise"] <= left
-            add("po", "pass" if ok else "fail", f"{_rupees(inv['amount_paise'])} against {_rupees(left)} left on {f['po']}.", f"pos.po={f['po']}")
+            balance = f"{_rupees(left)} left on {f['po']}" if left >= 0 else f"{f['po']}, which open invoices already exceed by {_rupees(-left)}"
+            add("po", "pass" if ok else "fail", f"{_rupees(inv['amount_paise'])} against {balance}.", f"pos.po={f['po']}")
 
     if vendor:
         odd_accounts = [a for a in f["accounts"] if a != vendor["account"]]

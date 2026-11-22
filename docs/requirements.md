@@ -31,20 +31,20 @@ Re-read against the ContextCon 05 Builder Handbook on 22 November 2026.
 
 | Criterion | Points | Evidence |
 | - | - | - |
-| End-to-end execution | 25 | A request becomes an issued payment run. A person appears only at sign-off and on exceptions |
-| Facts and verification | 20 | Record viewer, aliases keep one company as one record, honest "I can't verify" |
-| Robustness and edge cases | 20 | Messy Hinglish, injection, source failure, duplicate, lookalike, crash |
-| Customer value and idea | 20 | A paid job, and the rule that an invoice is never evidence for itself |
-| Demo and understanding | 15 | `docs/demo-script.md`, `NOTES.md`, this README |
+| End-to-end execution | 25 | A request routes to one of five jobs and ends in finished work: a run sheet, receipts, a posted statement or a close pack. A person appears only when the answer changes the result |
+| Facts and verification | 20 | Every finding opens its record, field and date. Aliases keep one company as one record. Unknowns say "I can't verify" |
+| Robustness and edge cases | 20 | Twelve live attacks, real `kill -9` tests, masked accounts, and a person on anything irreversible |
+| Customer value and idea | 20 | A job firms are paid for. An invoice is never evidence for itself, and Imposter Radar finds fake domains before they email |
+| Demo and understanding | 15 | `demo/GUIDE.md`, `docs/two-minute-script.md`, `NOTES.md`, the README |
 
 ## Submission
 
 | Item | Status |
 | - | - |
-| Public repo with history starting after 10:15 AM | Done. First commit 10:29 AM |
+| Public repo with history starting after 10:15 AM | First commit 10:29 AM. Confirm the repo is public before submitting |
 | README | Done |
 | Diagram link | `docs/architecture.md` |
 | Notes on what was tried | `NOTES.md` |
 | Two-minute video | **You record it** |
 | Submission form with every member's details | **You submit it** |
-| Price in rupees and cost of one job | ₹40 per invoice proposed. Cost is measured in credits and dollars. **The rupee price of a credit is still needed** |
+| Price in rupees and cost of one job | ₹40 per invoice proposed. A 12-invoice job uses 1.15 credits and about ₹0.92 of model calls. It stays profitable unless a credit costs more than about ₹416 |
