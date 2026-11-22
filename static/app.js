@@ -434,7 +434,8 @@ function openSign() {
     if (!reviewer()) { snack("Enter the reviewer's name first", true); document.getElementById("bySign").focus(); return; }
     hold.disabled = true;
     try {
-      if (S.counts.READY) await post("/api/signoff", { by: reviewer() });
+      const items = S.payment_run.lines.filter(l => l.state === "READY").map(l => ({ id: l.id, evidence: l.evidence }));
+      if (items.length) await post("/api/signoff", { by: reviewer(), items });
       await post("/api/pay", { by: reviewer() });
       close(); composerOpen = false; snack("Signed. Issuing each payment once."); sigs = {}; go("today"); await tick();
     } catch (e) { snack(e.message, true); hold.disabled = false; }

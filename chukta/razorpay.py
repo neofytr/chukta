@@ -64,13 +64,15 @@ class RazorpayBank:
             links = found.get("payment_links") if isinstance(found, dict) else None
             if status != 200 or not links:
                 raise PaymentUnavailable("Razorpay says this payment exists but did not return it")
-            link = links[0]
+            link = next((l for l in links if l.get("reference_id") == reference), None)
+            if not link:
+                raise PaymentUnavailable("Razorpay did not return this exact payment")
         elif status == 400:
             raise PaymentRejected(str(link.get("error", {}).get("description") or "Razorpay refused the request").rstrip("."))
         elif status != 200:
             raise PaymentUnavailable(f"Razorpay returned HTTP {status}")
         notes = link.get("notes") if isinstance(link.get("notes"), dict) else {}
-        if not link.get("id") or link.get("amount") != amount_paise or notes.get("check") != check or link.get("status") == "cancelled":
+        if not link.get("id") or link.get("amount") != amount_paise or notes.get("check") != check or link.get("status") not in ("created", "paid"):
             raise PaymentConflict(key)
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO provider_payments VALUES(?,?,?,?,?,?,?)",

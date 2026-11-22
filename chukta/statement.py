@@ -11,7 +11,8 @@ from .desk import _date, _paise, _rupees, now, same_company, today
 from .sources import SourceDown
 
 DAY = r"\d{1,2}[ /-][A-Za-z]{3,9}[ /-]\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2}"
-LINE = re.compile(rf"^\s*(?P<day>{DAY})\s*[·|,\t]+\s*(?P<text>.+?)\s*[·|,\t]+\s*(?:₹|rs\.?|inr)?\s*(?P<amount>\d[\d,]*(?:\.\d{{1,2}})?)\s*$", re.I)
+AMOUNT = r"(?:\d{1,2}(?:,\d{2})*,\d{3}|\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
+LINE = re.compile(rf"^\s*(?P<day>{DAY})\s*[·|,\t]+\s*(?P<text>.+?)\s*[·|,\t]+\s*(?:₹|rs\.?|inr)?\s*(?P<amount>{AMOUNT})\s*$", re.I)
 NOISE = {"UPI", "NEFT", "IMPS", "RTGS", "ACH", "POS", "ATM", "PAYTM", "RAZ", "RAZORPAY", "BANGALORE", "BENGALURU", "BLR", "MUMBAI", "DELHI",
          "CHENNAI", "PUNE", "HYDERABAD", "KOLKATA", "INDIA", "PAYMENT", "TXN", "REF"}
 LEGAL = {"limited", "ltd", "private", "pvt", "llp", "inc", "india", "corporation", "corp", "co", "company", "the"}
@@ -72,7 +73,8 @@ def _issued_payment(db, line):
     for o in db.execute("SELECT o.payee_name, o.net_paise, i.payment_ref FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id "
                         "WHERE o.client_id=? AND i.state='PAID' AND o.net_paise=?", (line["client_id"], line["amount_paise"])):
         brand = {w.upper() for w in _words(o["payee_name"])} - {"WORKS", "SERVICES", "TECHNOLOGIES", "ENTERPRISES", "TRADERS"}
-        if brand and brand <= words:
+        used = db.execute("SELECT 1 FROM bank_lines WHERE client_id=? AND source=? AND id!=?", (line["client_id"], f"payment:{o['payment_ref']}", line["id"])).fetchone()
+        if brand and brand <= words and not used:  # One payment explains one bank line.
             return o
     return None
 
@@ -94,7 +96,7 @@ def post_lines(db, src, client_id):
         if twin:
             _hold(db, line, f"Same payee, amount and date as line {twin['id']}. Possible duplicate charge.", f"bank_lines.id={twin['id']}")
             continue
-        if re.search(r"\b(REFUND|REVERSAL|REVERSED|CHARGEBACK|RETURN)\b", _norm(line["narration"])):
+        if re.search(r"\b(REFUND|REVERSAL|REVERSED|CHARGEBACK|RETURN|CR)\b", _norm(line["narration"])):
             _hold(db, line, "This looks like a refund or reversal. A person should match it to the original entry.", "statement line")
             continue
         rule_now = rule_for(line)

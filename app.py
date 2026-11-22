@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from chukta.books import books_payload, import_2b, import_pos, import_vendors
 from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
-from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, approve_bank_change, compute_tds, connect, ingest, now, parse, pay_approved, process,
+from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, approve_bank_change, compute_tds, evidence_hash, connect, ingest, now, parse, pay_approved, process,
                          propose_bank_change, recheck, reject)
 from chukta.exports import audit_file, bank_file, replay_lines, tally_vouchers, verify_audit
 from chukta.investigator import ModelDown, investigate, model_chat
@@ -188,7 +188,7 @@ def state_payload(db):
             tds = compute_tds(db, vendor, r)[0]
             net = r["amount_paise"] - tds if tds is not None else None
         if r["state"] in ("READY", "APPROVED") and net:
-            run_lines.append({"id": r["id"], "vendor": r["vendor_name"], "number": f.get("invoice_no"), "net": _rupees(net), "tds": _rupees(tds or 0),
+            run_lines.append({"id": r["id"], "evidence": evidence_hash(db, r["id"]), "vendor": r["vendor_name"], "number": f.get("invoice_no"), "net": _rupees(net), "tds": _rupees(tds or 0),
                               "due": r["due_date"], "state": r["state"]})
             totals["gross"] += r["amount_paise"]
             totals["tds"] += tds or 0
@@ -231,7 +231,7 @@ def invoice_payload(db, invoice_id):
             "vendor": vendor["name"] if vendor else "Unknown vendor", "gstin": r["gstin"], "net": _rupees(net) if net else "Unclear",
             "gross": _rupees(r["amount_paise"]) if r["amount_paise"] else "Unclear", "taxable": _rupees(r["taxable_paise"]) if r["taxable_paise"] else "Unclear",
             "tax": _rupees(r["tax_paise"]) if r["tax_paise"] else "Unclear", "tds": _rupees(tds) if tds is not None else "Needs a person",
-            "due": r["due_date"], "findings": findings, "reader_notes": fields.get("reader_notes", []),
+            "due": r["due_date"], "findings": findings, "reader_notes": [mask_text(n) for n in fields.get("reader_notes", [])],
             "events": [dict(x) for x in db.execute("SELECT event, actor, detail, at FROM events WHERE invoice_id=? ORDER BY id", (invoice_id,))],
             "investigation": {**dict(note), "citations": json.loads(note["citations"])} if note else None,
             "order": {k: _rupees(order[k]) for k in ("gross_paise", "tds_paise", "retained_gst_paise", "net_paise")} | {"by": order["approved_by"]} if order else None,
@@ -394,10 +394,12 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/signoff", "/api/pay") and not payment_allowed(db):
             raise ValueError("This run was checks only. Start a new run to pay.")
         if path == "/api/signoff":
-            ids = [r[0] for r in db.execute("SELECT id FROM invoices WHERE client_id=? AND state='READY'", (CLIENT,))]
-            for i in ids:
-                approve(db, i, by)
-            return {"signed": len(ids)}
+            items = body.get("items")  # Only what the reviewer saw, with the evidence they saw.
+            if not isinstance(items, list) or not items:
+                raise ValueError("Nothing was selected to sign")
+            for item in items:
+                approve(db, int(item["id"]), by, expected_evidence=str(item["evidence"]))
+            return {"signed": len(items)}
         if path == "/api/pay":
             if not db.execute("SELECT 1 FROM invoices WHERE state='APPROVED'").fetchone():
                 raise ValueError("Nothing is signed and waiting for payment")

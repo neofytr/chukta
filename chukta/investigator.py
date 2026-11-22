@@ -112,6 +112,14 @@ def _numbers(text):
     return {n for n in out if len(n) >= 3}
 
 
+def _unsafe(text, seen):
+    """A phone-like number the records do not contain, or language telling the reviewer to approve."""
+    digits = re.sub(r"\D", "", seen)
+    if any(re.sub(r"\D", "", run) not in digits for run in re.findall(r"(?:\d[ .-]?){8,}", text)):
+        return True
+    return bool(re.search(r"\b(safe to (sign|pay|approve)|approve (this|it)|go ahead|please pay|pay (this|it) now|sign (this|it))\b", text, re.I))
+
+
 def _callback(vendor_name):
     return (f"Call {vendor_name} on the number already in your records, not one from this email or invoice. "
             "Ask them to read out their bank account and IFSC, and to confirm whether they sent this request.")
@@ -155,7 +163,7 @@ def investigate(db, invoice_id, run_id, chat=model_chat, max_rounds=5):
             text, cited = answer.get("explanation"), answer.get("citations")
             if isinstance(text, str) and 20 <= len(text) <= 700 and isinstance(cited, list):
                 good = [c for c in cited if isinstance(c, str) and f'"ref": "{c}"' in seen]
-                if any(c.startswith("finding:") for c in good) and len(good) == len(cited) and _numbers(text) <= _numbers(seen):
+                if any(c.startswith("finding:") for c in good) and len(good) == len(cited) and _numbers(text) <= _numbers(seen) and not _unsafe(text, seen):
                     explanation, citations, author = text.strip(), good, "agent"
                     if answer.get("action") in allowed:
                         action = answer["action"]

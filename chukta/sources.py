@@ -1,6 +1,7 @@
 """Live data sources: throttled, retried, cached, and written to the ledger."""
 import http.client
 import json
+import math
 import pathlib
 import re
 import time
@@ -55,9 +56,10 @@ def http_call(method, url, headers, body, timeout=20):
 
 def _number(value, default=0.0):
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return default
+    return number if math.isfinite(number) and number >= 0 else default  # A bad header can never lower the ledger.
 
 
 class Sources:

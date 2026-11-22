@@ -82,6 +82,18 @@ def _dates(text):
     return found
 
 
+def _largest_sum(seen):
+    """The largest amount in the text that two others add up to. A model cannot promote a smaller figure to the total."""
+    values = sorted(seen)[-40:]
+    best = None
+    for i, a in enumerate(values):
+        for b in values[i:]:
+            hit = next((c for c in reversed(values) if abs(a + b - c) <= 100 and c > max(a, b)), None)
+            if hit and (best is None or hit > best):
+                best = hit
+    return best
+
+
 def read_invoice(text, chat_fn=chat):
     """Returns parse() fields plus reader_notes and usage."""
     out = parse(text) | {"reader_notes": [], "usage": None}
@@ -94,6 +106,12 @@ def read_invoice(text, chat_fn=chat):
         notes.append(f"Model unavailable ({e}). Used the rule-based parser only.")
         return out
 
+    def veto(name, proposed):
+        """Identity fields come only from the parser. The model may raise a doubt, never supply a value."""
+        if proposed is not None and out[name] is not None and _alnum(out[name]) != _alnum(proposed):
+            out[name] = None
+            notes.append(f"{name}: model and parser disagree, so it is treated as missing.")
+
     def merge(name, proposed):
         if proposed is None:
             return
@@ -104,12 +122,10 @@ def read_invoice(text, chat_fn=chat):
             out[name] = None
             notes.append(f"{name}: model and parser disagree, so it is treated as missing.")
 
-    if got.get("invoice_no") and _in_text(got["invoice_no"], text):
-        merge("invoice_no", str(got["invoice_no"]).strip())
-    if str(got.get("invoice_date")) in _dates(text):
-        merge("invoice_date", got["invoice_date"])
-    if got.get("po") and re.search(r"\d", str(got["po"])) and _in_text(got["po"], text):
-        merge("po", norm_po(got["po"]))
+    veto("invoice_no", got.get("invoice_no"))
+    veto("invoice_date", got.get("invoice_date") if str(got.get("invoice_date")) in _dates(text) else None)
+    if got.get("po") and re.search(r"\d", str(got["po"])):
+        veto("po", norm_po(got["po"]))
     # Extra bank details can only make the bank check stricter, so they are added rather than merged.
     account = re.sub(r"\D", "", str(got.get("account") or ""))
     if 9 <= len(account) <= 18 and _in_text(account, text) and account not in out["accounts"]:
@@ -125,7 +141,7 @@ def read_invoice(text, chat_fn=chat):
 
     seen = _amounts(text)
     total, taxable, tax = (_to_paise(got.get(k)) for k in ("total_rupees", "taxable_rupees", "tax_rupees"))
-    adds_up = bool(total and taxable and tax) and {total, taxable, tax} <= seen and abs(taxable + tax - total) <= 100
+    adds_up = bool(total and taxable and tax) and {total, taxable, tax} <= seen and abs(taxable + tax - total) <= 100 and total == _largest_sum(seen)
     if out["amount_locked"]:
         pass  # The parser found a reason this amount cannot be trusted. The model cannot override it.
     elif adds_up:

@@ -103,7 +103,7 @@ def october_2b():
 
 
 def seed(db):
-    add_client(db, CLIENT, CLIENT_NAME)
+    add_client(db, CLIENT, CLIENT_NAME, CLIENT_GSTIN)
     for key, v in VENDORS.items():
         known = db.execute("SELECT aliases FROM vendors WHERE client_id=? AND gstin=?", (CLIENT, v["gstin"])).fetchone()
         add_vendor(db, CLIENT, v["gstin"], v["name"], v["domain"], v["account"], v["ifsc"], onboarded_at=v["onboarded_at"],

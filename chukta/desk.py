@@ -10,6 +10,7 @@ import json
 import re
 import sqlite3
 import time
+import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -63,8 +64,8 @@ CREATE TABLE IF NOT EXISTS bank_lines(id INTEGER PRIMARY KEY, client_id TEXT NOT
 """
 REQUIRED = ("invoice_no", "invoice_date", "amount_paise", "gstin")
 # A person cannot approve past these. The document must be corrected or rejected.
-HARD_STOPS = ("required", "document", "vendor", "duplicate", "payment_conflict", "invoice_date", "instruction", "internal")
-MIGRATIONS = (("vendors", "pan_status", "TEXT NOT NULL DEFAULT 'operative'"), ("vendors", "transporter_declared", "INTEGER NOT NULL DEFAULT 0"),
+HARD_STOPS = ("required", "document", "vendor", "duplicate", "payment_conflict", "invoice_date", "instruction", "internal", "buyer", "master_changed")
+MIGRATIONS = (("clients", "gstin", "TEXT"), ("vendors", "pan_status", "TEXT NOT NULL DEFAULT 'operative'"), ("vendors", "transporter_declared", "INTEGER NOT NULL DEFAULT 0"),
               ("vendors", "rcm", "TEXT"), ("vendors", "einvoice_required", "INTEGER NOT NULL DEFAULT 0"), ("invoices", "master_hash", "TEXT"), ("events", "prev_hash", "TEXT NOT NULL DEFAULT ''"), ("events", "hash", "TEXT NOT NULL DEFAULT ''"))
 STALE_INVOICE_DAYS = 365  # Older than this needs a person. Tune per client.
 REPEAT_ON_PO_DAYS = 180  # Same amount on the same PO inside this window is held as a possible re-presentation.
@@ -75,6 +76,9 @@ FREE_MAIL = {"gmail.com", "yahoo.com", "yahoo.co.in", "outlook.com", "hotmail.co
 TWO_PART_SUFFIXES = {"co.in", "org.in", "net.in", "firm.in", "gen.in", "ind.in", "ac.in", "gov.in", "co.uk"}
 MIN_MATCH_CONFIDENCE = 0.9  # Crustdata identify score. Tune if honest vendors are held.
 NUM = r"\d[\d,]*(?:\.\d{1,2})?"
+STRICT_NUM = re.compile(r"(?:\d+|\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})*,\d{3})(?:\.\d{1,2})?")
+MAX_PAISE = 10 ** 13
+CURRENCIES = r"usd|eur|gbp|aed|sgd|jpy|cny|chf|aud|cad|hkd|sar|qar"
 TOTAL_LABELS = ("grand total", "total payable", "amount payable", "net payable", "invoice total", "invoice amount",
                 "total amount", "total", "balance due", "amount due")
 DATE = r"(\d{1,2}(?:st|nd|rd|th)?[ /.-]+(?:[A-Za-z]{3,9}|\d{1,2})[ /.,-]+\d{4}|\d{4}-\d{2}-\d{2})"
@@ -113,9 +117,9 @@ def today():
     return time.strftime("%Y-%m-%d")
 
 
-def add_client(db, client_id, name):
+def add_client(db, client_id, name, gstin=None):
     with db:
-        db.execute("INSERT OR REPLACE INTO clients VALUES(?,?)", (client_id, name))
+        db.execute("INSERT OR REPLACE INTO clients(id, name, gstin) VALUES(?,?,?)", (client_id, name, gstin))
 
 
 def add_vendor(db, client_id, gstin, name, domain, account, ifsc, emails=(), aliases=(), onboarded_at=None, msme=None,
@@ -151,10 +155,13 @@ def gstin_valid(g):
 
 
 def _paise(text):
+    if not STRICT_NUM.fullmatch(str(text).strip()):
+        return None  # 1180,00 must never be read as 1,18,000.
     try:
-        return int((Decimal(text.replace(",", "")) * 100).to_integral_exact())
-    except (InvalidOperation, ValueError):
+        paise = int((Decimal(str(text).replace(",", "")) * 100).to_integral_exact())
+    except (InvalidOperation, ValueError, OverflowError):
         return None
+    return paise if paise <= MAX_PAISE else None
 
 
 def _date(text):
@@ -162,7 +169,8 @@ def _date(text):
     text = re.sub(r"[,\s]+", " ", text)
     for fmt in ("%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d"):
         try:
-            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            parsed = datetime.strptime(text, fmt)
+            return parsed.strftime("%Y-%m-%d") if 2000 <= parsed.year <= 2100 else None
         except ValueError:
             pass
     return None
@@ -185,27 +193,36 @@ def _delivery_date(text):
 
 def _amounts(text):
     """Total, taxable and tax in paise. Anything unclear is None, with an issue recorded."""
-    issues, totals, taxable, tax_parts, tax_total = [], {}, None, [], None
-    value = rf"\s*[:=-]?\s*(?:₹|rs\.?|inr)?\s*({NUM})\s*(?:/-)?\s*(?:only)?\.?\s*"
+    issues, totals, taxable, tax_parts, tax_total, locked = [], {}, None, [], None, False
+    value = rf"\s*(?:[:=]|-\s)?\s*(?:₹|rs\.?|inr)?\s*({NUM})\s*(?:/-)?\s*(?:only)?\.?\s*"
     label = "|".join(l.replace(" ", r"\s+") for l in TOTAL_LABELS)
     for line in text.splitlines():
         m = re.match(rf"\W*({label})\b(.*)$", line, re.I)
         if m:
             found = re.fullmatch(value, re.sub(r"\([^)]*\)", "", m.group(2)), re.I)
             if found:
-                totals.setdefault(" ".join(m.group(1).lower().split()), set()).add(_paise(found.group(1)))
-        numbers = re.findall(NUM, line)
+                paise = _paise(found.group(1))
+                if paise is None:
+                    issues.append("A total is written in an unclear number format.")
+                    locked = True
+                else:
+                    totals.setdefault(" ".join(m.group(1).lower().split()), set()).add(paise)
+        numbers = re.findall(NUM, re.sub(r"\([^)]*\)", " ", line))  # (HSN 9983) and (18%) are not amounts.
         if numbers and re.match(r"\W*(?:taxable\s+(?:value|amount)|sub[ -]?total)\b", line, re.I):
             taxable = _paise(numbers[-1])
         elif numbers and re.match(r"\W*(?:cgst|sgst|utgst|igst|cess)\b", line, re.I):
             tax_parts.append(_paise(numbers[-1]))
         elif numbers and re.match(r"\W*(?:total\s+(?:tax|gst)|tax\s+amount)\b", line, re.I):
             tax_total = _paise(numbers[-1])
-    tax = sum(tax_parts) if tax_parts else tax_total
+    tax = None if None in tax_parts else sum(tax_parts) if tax_parts else tax_total
 
-    amount, locked = None, False
+    amount = None
     rank = [l for l in TOTAL_LABELS if l in totals]
-    if rank:
+    strong = {v for l in TOTAL_LABELS[:7] for v in totals.get(l, ())}
+    if len(strong) > 1:  # Grand total 1,18,000 with net payable 68,000 needs a person.
+        issues.append("The invoice states different totals.")
+        locked = True
+    elif rank and not locked:
         values = totals[rank[0]]
         if len(values) == 1:
             amount = next(iter(values))
@@ -216,7 +233,7 @@ def _amounts(text):
     if amount and due and due != {amount}:
         issues.append("Balance due differs from the invoice total, so this looks part-paid.")
         amount, locked = None, True
-    if re.search(r"\b(?:usd|eur|gbp|aed|sgd)\b|[$€£]", text, re.I):
+    if re.search(rf"\b(?:{CURRENCIES})\b|[$€£¥]", text, re.I):
         issues.append("Invoice mentions a foreign currency.")
         amount, locked = None, True
     if amount and taxable and tax and abs(taxable + tax - amount) > 100:
@@ -226,19 +243,24 @@ def _amounts(text):
 
 
 def _seller_gstin(text):
-    found, buyer_block = [], False
+    return _gstins(text)[0]
+
+
+def _gstins(text):
+    """Returns the seller GSTIN, or None if unclear, and the first GSTIN in a buyer block."""
+    found, buyers, buyer_block = [], [], False
     for line in text.splitlines():
         if not line.strip():
             buyer_block = False
-        elif re.match(r"\W*(?:details\s+of\s+)?(?:bill(?:ed)?\s*to|ship(?:ped)?\s*to|buyer|customer|consignee|recipient|receiver)\b",
+        elif re.match(r"\W*(?:details\s+of\s+)?(?:bill(?:ed)?\s*to|ship(?:ped)?\s*to|invoice\s*to|sold\s*to|buyer|customer|consignee|recipient|receiver)\b",
                       line, re.I):
             buyer_block = True
         elif re.match(r"\W*(?:details\s+of\s+)?(?:supplier|seller|vendor|from)\b", line, re.I):
             buyer_block = False
-        if not buyer_block:
-            found += re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", line.upper())
+        hits = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", line.upper())
+        (buyers if buyer_block else found).extend(hits)
     # Two different seller GSTINs is ambiguous, so it counts as missing rather than a guess.
-    return found[0] if len(set(found)) == 1 else None
+    return (found[0] if len(set(found)) == 1 else None), (buyers[0] if buyers else None)
 
 
 def norm_po(value):
@@ -260,12 +282,15 @@ def _invoice_no(text):
                          r"([A-Z]{1,10} \d[A-Z0-9/._-]*|[A-Z0-9][A-Z0-9/._-]*)", text, re.I):
         token = m.group(1).rstrip("/._-")
         if re.search(r"\d", token):
-            return token
+            return token if len(token) <= 40 else None
     return None
 
 
 def parse(text):
     amount, taxable, tax, issues, locked = _amounts(text)
+    if any(unicodedata.category(c) == "Cf" or (c.isdigit() and not c.isascii()) for c in text):
+        issues.append("The text contains hidden characters or non-standard digits.")
+        amount, locked = None, True
     kind = re.search(r"\b(credit note|debit note|pro-?forma|quotation|statement of account|delivery challan)\b", text, re.I)
     if kind:
         issues.append(f"This document is a {kind.group(1).lower()}, not a tax invoice.")
@@ -284,6 +309,7 @@ def parse(text):
         "tax_paise": tax,
         "amount_locked": locked,
         "gstin": _seller_gstin(text),
+        "buyer_gstin": _gstins(text)[1],
         "accounts": sorted({re.sub(r"\D", "", a) for a in accounts}),
         "ifscs": sorted({c.upper() for c in re.findall(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", text, re.I)}),
         "sender_emails": sorted(emails),
@@ -355,7 +381,7 @@ def ingest(db, client_id, raw, read=parse):
         db.execute("INSERT OR IGNORE INTO invoices(client_id, raw, raw_hash, fields, gstin, po, amount_paise, taxable_paise, tax_paise, "
                    "invoice_date, fy, number_core, fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (client_id, raw, digest, json.dumps(f), f["gstin"], f["po"], f["amount_paise"], f["taxable_paise"], f["tax_paise"],
-                    f["invoice_date"], financial_year(f["invoice_date"]) if f["invoice_date"] else None, int(digits[-1]) if digits else None,
+                    f["invoice_date"], financial_year(f["invoice_date"]) if f["invoice_date"] else None, int(digits[-1]) if digits and len(digits[-1]) <= 15 else None,
                     fingerprint(client_id, f["gstin"], f["invoice_no"], f["invoice_date"])))
     return db.execute("SELECT id FROM invoices WHERE client_id=? AND raw_hash=?", (client_id, digest)).fetchone()[0]
 
@@ -369,11 +395,16 @@ def same_company(a, b):
 
 
 def _edit_distance(a, b):
-    row = list(range(len(b) + 1))
+    """Edits needed to turn a into b. Swapping two neighbouring letters counts as one."""
+    before, row = None, list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
-        prev, row[0] = row[0], i
+        current = [i]
         for j, cb in enumerate(b, 1):
-            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (ca != cb))
+            cost = min(row[j] + 1, current[j - 1] + 1, row[j - 1] + (ca != cb))
+            if before and i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cost = min(cost, before[j - 2] + 1)
+            current.append(cost)
+        before, row = row, current
     return row[-1]
 
 
@@ -397,7 +428,7 @@ def imitates(domain, real):
     distance = _edit_distance(_skeleton(brand), _skeleton(real_brand))
     if distance == 0:
         return brand != real_brand or _edit_distance(suffix, real_suffix) <= 1
-    return distance <= (2 if len(real_brand) >= 6 else 1 if len(real_brand) >= 4 else 0)
+    return distance <= (2 if len(real_brand) >= 8 else 1 if len(real_brand) >= 4 else 0)  # Tuned on 2,994 real Indian domains.
 
 
 def _mask(account):
@@ -451,8 +482,8 @@ def compute_tds(db, vendor, inv):
     if kind not in TDS_THRESHOLD_PAISE:
         return None, "unverified", "I can't verify TDS: the vendor master has no payment category."
     base = inv["taxable_paise"]
-    if not base:
-        return None, "unverified", "I can't verify TDS: the taxable value is unclear."
+    if not base or inv["amount_paise"] is None or abs(base + (inv["tax_paise"] or 0) - inv["amount_paise"]) > 100:
+        return None, "unverified", "I can't verify TDS: the taxable value and tax do not add up to the invoice total."
     pan_ok = vendor["pan_status"] == "operative"
     if kind == "contractor" and vendor["transporter_declared"] and pan_ok:
         return 0, "pass", "Nil TDS: transporter with up to 10 goods carriages, PAN and declaration on file. Report it in the TDS return."
@@ -555,6 +586,10 @@ def run_checks(db, src, inv, as_of=None):
         add("document", "fail", " ".join(f["issues"]), "invoice text")
     else:
         add("document", "pass", "Reads as a tax invoice in rupees and its totals agree.", "invoice text")
+
+    buyer = db.execute("SELECT gstin FROM clients WHERE id=?", (client,)).fetchone()
+    if buyer and buyer["gstin"] and f.get("buyer_gstin") and f["buyer_gstin"] != buyer["gstin"]:
+        add("buyer", "fail", f"This invoice is billed to GSTIN {f['buyer_gstin']}, not this client.", "invoice text")
 
     if inv["invoice_date"]:
         age = (date.fromisoformat(as_of) - date.fromisoformat(inv["invoice_date"])).days
@@ -746,18 +781,21 @@ def process(db, src, as_of=None):
     for inv in new:
         try:
             findings = run_checks(db, src, inv, as_of)
-        except (KeyError, TypeError, ValueError, AttributeError, IndexError, sqlite3.DataError) as e:
+            vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
+            due = msme_due(vendor, inv["invoice_date"], json.loads(inv["fields"]).get("delivery_date"))
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError, OverflowError, sqlite3.DataError) as e:
             # One unreadable record must not stop the batch or be read as clean.
             findings = [(inv["id"], "internal", "unverified", "hold", f"I can't verify this invoice: checks stopped ({type(e).__name__}).",
                          "chukta", today())]
+            vendor, due = None, None
         with db:
-            db.execute("DELETE FROM findings WHERE invoice_id=?", (inv["id"],))
-            db.executemany("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)", findings)
             state = decide(findings)
-            vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
-            db.execute("UPDATE invoices SET state=?, due_date=?, master_hash=? WHERE id=? AND state='NEW'",
-                       (state, msme_due(vendor, inv["invoice_date"], json.loads(inv["fields"]).get("delivery_date")), master_hash(vendor), inv["id"]))
-            _event(db, inv["id"], "checked", "chukta", state)
+            moved = db.execute("UPDATE invoices SET state=?, due_date=?, master_hash=? WHERE id=? AND state='NEW'",
+                               (state, due, master_hash(vendor), inv["id"])).rowcount
+            if moved:  # A stale worker can never rewrite the evidence of a signed invoice.
+                db.execute("DELETE FROM findings WHERE invoice_id=?", (inv["id"],))
+                db.executemany("INSERT INTO findings VALUES(?,?,?,?,?,?,?)", findings)
+                _event(db, inv["id"], "checked", "chukta", state)
 
 
 def event_hash(previous, invoice_id, event, actor, detail, at):
@@ -796,7 +834,7 @@ def add_alias(db, src, invoice_id, by):
     return recheck(db, src, invoice_id, by)
 
 
-def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=False):
+def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=False, expected_evidence=None):
     """A named person signs. The exact payee and amount are frozen here, and payment uses only this record."""
     if not by.strip():
         raise ValueError("approval needs a named person")
@@ -826,6 +864,8 @@ def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=Fal
                 if signed + inv["amount_paise"] > po["amount_paise"]:
                     raise ValueError(f"invoice {invoice_id} would overspend {inv['po']}")
         evidence = evidence_hash(db, invoice_id)
+        if expected_evidence and expected_evidence != evidence:
+            raise ValueError(f"invoice {invoice_id} changed after you reviewed it. Review it again.")
         tds = compute_tds(db, vendor, inv)[0]
         if tds_override_paise is not None:
             if tds_override_paise < 0 or not note.strip():
@@ -842,9 +882,12 @@ def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=Fal
         if net <= 0:
             raise ValueError(f"invoice {invoice_id}: net payable must be above zero")
         books = db.execute("SELECT value FROM meta WHERE key='books_id'").fetchone()[0]
-        db.execute("INSERT OR REPLACE INTO payment_orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (invoice_id, inv["client_id"], f"chukta:{books}:{inv['fingerprint']}", vendor["gstin"], vendor["name"], vendor["account"],
-                    vendor["ifsc"], inv["amount_paise"], tds, retained, net, evidence, by, now()))
+        try:
+            db.execute("INSERT INTO payment_orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (invoice_id, inv["client_id"], f"chukta:{books}:{inv['fingerprint']}", vendor["gstin"], vendor["name"], vendor["account"],
+                        vendor["ifsc"], inv["amount_paise"], tds, retained, net, evidence, by, now()))
+        except sqlite3.IntegrityError as e:
+            raise ValueError(f"invoice {invoice_id} already has a signed payment") from e
         db.execute("UPDATE invoices SET state='APPROVED' WHERE id=?", (invoice_id,))
         _event(db, invoice_id, "approved", by, f"{note or 'clean invoice'} | gross {_rupees(inv['amount_paise'])}, TDS {_rupees(tds)}, "
                f"GST retained {_rupees(retained)}, net {_rupees(net)}")
@@ -910,7 +953,7 @@ def reject(db, invoice_id, by, reason):
 
 def recheck(db, src, invoice_id, by):
     """Run the checks again after a fact changed. Any earlier sign-off no longer counts."""
-    with db:
+    with _pay_lock(db), db:  # Waits for a payment run in progress, so a recheck cannot race it.
         db.execute("BEGIN IMMEDIATE")
         inv = db.execute("SELECT state FROM invoices WHERE id=?", (invoice_id,)).fetchone()
         if not inv or inv["state"] not in ("READY", "HELD", "BLOCKED", "APPROVED"):
@@ -964,10 +1007,15 @@ def pay_approved(db, bank):
                 continue  # Rejected or rechecked after this batch was read.
             vendor = db.execute("SELECT account, ifsc FROM vendors WHERE client_id=? AND gstin=?", (o["client_id"], o["payee_gstin"])).fetchone()
             sent = db.execute("SELECT 1 FROM provider_payments WHERE idempotency_key=?", (o["idempotency_key"],)).fetchone()
-            if not sent and (not vendor or (vendor["account"], vendor["ifsc"]) != (o["account"], o["ifsc"])):
-                with db:  # A signed payment never goes to a master that has moved on. A person must look again.
+            inv_po = db.execute("SELECT po FROM invoices WHERE id=?", (o["invoice_id"],)).fetchone()[0]
+            po = db.execute("SELECT * FROM pos WHERE client_id=? AND po=?", (o["client_id"], inv_po)).fetchone() if inv_po else None
+            signed = db.execute("SELECT COALESCE(SUM(x.gross_paise), 0) FROM payment_orders x JOIN invoices i ON i.id=x.invoice_id WHERE i.client_id=? AND i.po=? "
+                                "AND i.state IN ('APPROVED','PAID')", (o["client_id"], inv_po)).fetchone()[0] if inv_po else 0
+            po_moved = bool(po) and (po["gstin"] != o["payee_gstin"] or signed > po["amount_paise"])
+            if not sent and (po_moved or not vendor or (vendor["account"], vendor["ifsc"]) != (o["account"], o["ifsc"])):
+                with db:  # A signed payment never goes out on facts that have moved on. A person must look again.
                     db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)",
-                               (o["invoice_id"], "master_changed", "fail", "hold", "The vendor's bank details changed after sign-off. Recheck and sign again.", "vendors.account", today()))
+                               (o["invoice_id"], "master_changed", "fail", "hold", "The vendor's bank details or PO changed after sign-off. Recheck and sign again.", "vendors.account", today()))
                     db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (o["invoice_id"],))
                     db.execute("UPDATE invoices SET state='HELD' WHERE id=? AND state='APPROVED'", (o["invoice_id"],))
                     _event(db, o["invoice_id"], "master_changed", "chukta", "payment stopped")

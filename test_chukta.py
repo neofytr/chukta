@@ -610,6 +610,54 @@ assert refuses(import_vendors, db, "c1", f"gstin,name,domain,account,ifsc\n{NEW}
 assert refuses(import_vendors, db, "c1", "gstin,name,domain,account,ifsc\n29AAAAA0000A1ZZ,Bad,bad.in,50100999988887,HDFC0000001")
 assert refuses(import_pos, db, "c1", "po,gstin,amount\nPO-1,27AAPFU0939F1ZV,100"), "a PO needs a known vendor"
 
+# Red-team regressions
+assert parse("Grand Total: 1,18,000\nNet Payable: 68,000")["amount_paise"] is None, "different totals"
+assert parse("Grand Total: 1180,00")["amount_paise"] is None and parse("Grand Total -5,000")["amount_paise"] is None
+assert parse("Grand Total: 5,000 (JPY)")["amount_paise"] is None
+assert parse("Taxable Value: 1,00,000 (HSN 9983)")["taxable_paise"] == 10000000 and parse("IGST 18,000 (18%)")["tax_paise"] == 1800000
+assert parse("Invoice No: INV-00\u200b42\nGrand Total: 1,000")["amount_paise"] is None, "hidden characters"
+assert parse("Grand Total: 99999999999999999999")["amount_paise"] is None and parse("Invoice Date: 01 Jan 9999")["invoice_date"] is None
+assert imitates("zhoo.com", "zoho.com"), "swapped letters"
+assert not imitates("goniyo.com", "bonito.in"), "two edits on a short name is a different company"
+BUY = "27AAPFU0939F1ZV"
+db, net, src = desk()
+add_client(db, "c1", "Kaveri Foods", "29ZZZCK0001K1Z" + gstin_check("29ZZZCK0001K1Z"))
+i = ingest(db, "c1", invoice())
+process(db, src)
+assert state(db, i) == "HELD" and refuses(approve, db, i, "tester", "ok"), "billed to another company"
+i_big = run(invoice(), tds_class="contractor")
+wrong_base = "From: A <billing@acmetools.in>\nSupplier GSTIN: " + ACME + "\nInvoice No: Z-9\nInvoice Date: 07 Oct 2026\nPO: PO-1001\nTaxable Value: 100\nGrand Total: 1,000\n"
+assert run(wrong_base, tds_class="contractor")[2] == "HELD", "TDS needs totals that add up"
+fake = {"invoice_no": "OTHER-1", "invoice_date": "2026-10-07", "po": "1001", "taxable_rupees": 50000, "tax_rupees": 9000, "total_rupees": 59000}
+half = "Supplier GSTIN: " + ACME + "\nbill no KF-1 dt 7 oct 2026 po 1001. 1,00,000 + 18,000 = 1,18,000. advance 50,000 + 9,000 = 59,000."
+got = read_invoice(half, lambda t: (fake, {}))
+assert got["amount_paise"] is None and got["invoice_no"] is None, "the model cannot choose a smaller total or a new number"
+db, net, src = desk()
+i = ingest(db, "c1", invoice())
+process(db, src)
+findings_before = db.execute("SELECT COUNT(*) FROM findings WHERE invoice_id=?", (i,)).fetchone()[0]
+assert refuses(approve, db, i, "tester", "", None, False, "not-the-evidence"), "sign-off is bound to what was reviewed"
+approve(db, i, "tester")
+add_po(db, "c1", "PO-1001", ACME, 100)
+pay_approved(db, SandboxBank(db))
+assert payments(db) == 0 and state(db, i) == "HELD", "a PO cut after sign-off stops payment"
+class Vanishing(FakeRazorpay):
+    def __call__(self, method, url, headers, body, timeout=20):
+        got = super().__call__(method, url, headers, body, timeout)
+        if method == "POST" and got[0] == 200:
+            raise TimeoutError
+        return got
+db, net, src = desk()
+i = ingest(db, "c1", invoice(taxable="1,000.00", tax="180.00", total="1,180.00"))
+process(db, src)
+approve(db, i, "tester")
+vanish = Vanishing()
+pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", vanish, sleep=lambda s: None))
+assert state(db, i) == "APPROVED" and refuses(recheck, db, src, i, "tester"), "an unclear payment cannot be rechecked away"
+other = FakeRazorpay()
+other.links = [{"id": "plink_OTHER", "reference_id": "ck_other", "amount": 118000, "status": "expired", "notes": {}}]
+assert net.statuses == []
+
 # Request intake: wording can never switch a control off
 from chukta.demo import SAMPLE_STATEMENT, STATEMENT_EXPECTED  # noqa: E402
 from chukta.records import record  # noqa: E402

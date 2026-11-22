@@ -4,6 +4,7 @@ import io
 import json
 
 from .desk import _mask, _rupees, decide, event_hash, evidence_hash, now
+from .records import mask_text
 
 
 def _safe(value):
@@ -101,6 +102,7 @@ def audit_file(db, client_id):
         fields = json.loads(inv["fields"])
         fields.pop("usage", None)
         fields["accounts"] = [_mask(a) for a in fields.get("accounts", [])]  # Only the data an audit needs.
+        fields["reader_notes"] = [mask_text(n) for n in fields.get("reader_notes", [])]
         fields["sender_emails"] = sorted({e.split("@")[-1] for e in fields.get("sender_emails", [])})
         invoices.append({
             "invoice_id": i, "state": inv["state"], "fields": fields, "payment_reference": inv["payment_ref"],

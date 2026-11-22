@@ -10,7 +10,7 @@ def _row(label, value, hit=False):
 
 
 def mask_text(text):
-    return re.sub(r"\b\d(?:[ -]?\d){8,17}\b", lambda m: "****" + re.sub(r"\D", "", m.group(0))[-4:], text)
+    return re.sub(r"\b\d(?:[\s.-]*\d){8,17}\b", lambda m: "****" + re.sub(r"\D", "", m.group(0))[-4:], text)
 
 
 def _passage(inv, pattern, title, source):

@@ -1,0 +1,72 @@
+{
+ "measured_on": "2026-11-22",
+ "source": "Crustdata company search, Indian companies with a website, six size bands",
+ "companies": 2994,
+ "credits_spent": 190.0,
+ "lookalike_attacks": {
+  "doubled letter": {
+   "tested": 2848,
+   "caught_pct": 100.0
+  },
+  "inserted hyphen": {
+   "tested": 2848,
+   "caught_pct": 100.0
+  },
+  "look-alike character": {
+   "tested": 2900,
+   "caught_pct": 99.8
+  },
+  "missing letter": {
+   "tested": 2848,
+   "caught_pct": 99.2
+  },
+  "one-letter TLD change": {
+   "tested": 2638,
+   "caught_pct": 100.0
+  },
+  "other TLD": {
+   "tested": 2994,
+   "caught_pct": 0.0
+  },
+  "rn for m": {
+   "tested": 857,
+   "caught_pct": 100.0
+  },
+  "swapped letters": {
+   "tested": 2753,
+   "caught_pct": 99.8
+  },
+  "wrong letter": {
+   "tested": 2848,
+   "caught_pct": 99.8
+  }
+ },
+ "lookalike_attacks_overall_pct": 99.8,
+ "honest_domain_pairs_tested": 300000,
+ "honest_pairs_wrongly_blocked": 14,
+ "honest_block_rate_pct": 0.0047,
+ "legal_suffix_variants_tested": 11976,
+ "legal_suffix_match_pct": 100.0,
+ "different_company_pairs_tested": 100000,
+ "different_companies_matched_by_name": 0,
+ "names_checked": 500,
+ "names_shared_by_2plus_companies_pct": 33.2,
+ "shared_name_pct_by_size": {
+  "2-10": 24.1,
+  "11-50": 30.5,
+  "51-200": 23.9,
+  "201-500": 33.8,
+  "501-1000": 39.7,
+  "1001-5000": 46.8
+ },
+ "status": {
+  "active": 2931,
+  "deleted": 63
+ },
+ "record_age_days": {
+  "median": 0,
+  "p90": 2,
+  "max": 10
+ },
+ "lookalike_note": "Overall excludes the same brand on another TLD, which is held rather than blocked. Every non-matching sender domain is at least held."
+}
