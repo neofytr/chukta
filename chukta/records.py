@@ -61,7 +61,11 @@ def record(db, invoice_id, check):
                     _row("IFSC on invoice", ", ".join(f["ifscs"]) or "None", finding["status"] != "pass")] + rows
         if check == "tds" and inv["taxable_paise"]:
             rows.insert(0, _row("Taxable value on this invoice", _rupees(inv["taxable_paise"]), True))
-        return base | {"title": "Vendor master", "kind": "fields", "rows": rows}
+        out = base | {"title": "Vendor master", "kind": "fields", "rows": rows}
+        if check == "bank" and f["accounts"]:
+            out["compare"] = [{"label": "Account", "invoice": _mask(f["accounts"][0]), "master": _mask(vendor["account"])},
+                              {"label": "IFSC", "invoice": (f["ifscs"] or ["Not stated"])[0], "master": vendor["ifsc"]}]
+        return out
     if check in ("duplicate", "near_duplicate"):
         m = re.search(r"invoices\.id=(\d+)", finding["source"])
         twin = db.execute("SELECT * FROM invoices WHERE id=?", (int(m.group(1)),)).fetchone() if m else None

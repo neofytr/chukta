@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from chukta.books import books_payload, import_2b, import_pos, import_vendors
 from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
-from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, approve_bank_change, compute_tds, evidence_hash, connect, ingest, now, parse, pay_approved, process,
+from chukta.desk import (HARD_STOPS, SandboxBank, _paise, _rupees, add_alias, approve, approve_bank_change, compute_tds, evidence_hash, connect, ingest, now, parse, pay_approved, process,
                          propose_bank_change, recheck, reject)
 from chukta.exports import audit_file, bank_file, replay_lines, tally_vouchers, verify_audit
 from chukta.investigator import ModelDown, investigate, model_chat
@@ -235,7 +235,7 @@ def invoice_payload(db, invoice_id):
             "events": [dict(x) for x in db.execute("SELECT event, actor, detail, at FROM events WHERE invoice_id=? ORDER BY id", (invoice_id,))],
             "investigation": {**dict(note), "citations": json.loads(note["citations"])} if note else None,
             "order": {k: _rupees(order[k]) for k in ("gross_paise", "tds_paise", "retained_gst_paise", "net_paise")} | {"by": order["approved_by"]} if order else None,
-            "payment_ref": r["payment_ref"], "raw": mask_text(r["raw"]),
+            "payment_ref": r["payment_ref"], "raw": mask_text(r["raw"]), "evidence": evidence_hash(db, r["id"]),
             "can_approve": r["state"] in ("READY", "HELD") and not (failing & set(HARD_STOPS)), "needs_tds": tds is None and bool(vendor),
             "can_retain_gst": "gst" in failing and bool(r["tax_paise"]),
             "can_alias": bool(company and company["status"] == "unverified" and "resolves to" in company["detail"]),
@@ -428,11 +428,13 @@ class Handler(BaseHTTPRequestHandler):
             raw = body.get("tds_rupees")
             override = None
             if raw not in (None, ""):
-                try:
-                    override = round(float(raw) * 100)
-                except (TypeError, ValueError, OverflowError) as e:
-                    raise ValueError("Enter TDS as a rupee amount") from e
-            approve(db, invoice_id, by, note, tds_override_paise=override, retain_gst=bool(body.get("retain_gst")))
+                override = _paise(str(raw).replace("₹", "").strip())
+                if override is None:
+                    raise ValueError("Enter TDS as a rupee amount")
+            evidence = str(body.get("evidence") or "")  # The approval covers only the evidence the reviewer saw.
+            if not evidence:
+                raise ValueError("Open the invoice again before approving")
+            approve(db, invoice_id, by, note, tds_override_paise=override, retain_gst=bool(body.get("retain_gst")), expected_evidence=evidence)
         elif path == "/api/reject":
             reject(db, invoice_id, by, note)
         elif path == "/api/recheck":
@@ -455,6 +457,7 @@ if __name__ == "__main__":
     if "--reset" in sys.argv:
         for suffix in ("", "-wal", "-shm", ".paylock"):
             pathlib.Path(DB + suffix).unlink(missing_ok=True)
+    (ROOT / "chukta.pid").write_text(str(os.getpid()))  # Lets a demo kill exactly this process.
     resumed = resume()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Chukta is running on http://127.0.0.1:{PORT}" + (" and resuming interrupted work" if resumed else ""), flush=True)
