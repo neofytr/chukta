@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation
 
-from .desk import _date, parse
+from .desk import _date, norm_po, now, parse
 
 MODEL = "deepseek/deepseek-v4.1-flash"
 USD_PER_TOKEN = {"prompt": 0.30e-6, "completion": 1.20e-6}  # From GET /models, 22 Nov 2026.
@@ -81,8 +81,8 @@ def _dates(text):
 
 
 def read_invoice(text, chat_fn=chat):
-    """Returns parse() fields plus taxable_paise, tax_paise, reader_notes and usage."""
-    out = parse(text) | {"taxable_paise": None, "tax_paise": None, "reader_notes": [], "usage": None}
+    """Returns parse() fields plus reader_notes and usage."""
+    out = parse(text) | {"reader_notes": [], "usage": None}
     notes = out["reader_notes"]
     try:
         got, out["usage"] = chat_fn(text)
@@ -106,15 +106,15 @@ def read_invoice(text, chat_fn=chat):
         merge("invoice_no", str(got["invoice_no"]).strip())
     if str(got.get("invoice_date")) in _dates(text):
         merge("invoice_date", got["invoice_date"])
-    po = re.sub(r"\D", "", str(got.get("po") or ""))
-    if po and _in_text(po, text):
-        merge("po", f"PO-{int(po)}")
+    if got.get("po") and re.search(r"\d", str(got["po"])) and _in_text(got["po"], text):
+        merge("po", norm_po(got["po"]))
+    # Extra bank details can only make the bank check stricter, so they are added rather than merged.
     account = re.sub(r"\D", "", str(got.get("account") or ""))
-    if 9 <= len(account) <= 18 and _in_text(account, text):
-        merge("account", account)
+    if 9 <= len(account) <= 18 and _in_text(account, text) and account not in out["accounts"]:
+        out["accounts"] = sorted({*out["accounts"], account})
     ifsc = str(got.get("ifsc") or "").upper()
-    if re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", ifsc) and _in_text(ifsc, text):
-        merge("ifsc", ifsc)
+    if re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", ifsc) and _in_text(ifsc, text) and ifsc not in out["ifscs"]:
+        out["ifscs"] = sorted({*out["ifscs"], ifsc})
 
     # The GSTIN is never filled by the model: a parser miss can mean two seller GSTINs.
     if got.get("gstin") and out["gstin"] and _alnum(got["gstin"]) != out["gstin"]:
@@ -124,8 +124,11 @@ def read_invoice(text, chat_fn=chat):
     seen = _amounts(text)
     total, taxable, tax = (_to_paise(got.get(k)) for k in ("total_rupees", "taxable_rupees", "tax_rupees"))
     adds_up = bool(total and taxable and tax) and {total, taxable, tax} <= seen and abs(taxable + tax - total) <= 100
-    if adds_up:
-        out["taxable_paise"], out["tax_paise"] = taxable, tax
+    if out["amount_locked"]:
+        pass  # The parser found a reason this amount cannot be trusted. The model cannot override it.
+    elif adds_up:
+        merge("taxable_paise", taxable)
+        merge("tax_paise", tax)
         merge("amount_paise", total)
     elif total and out["amount_paise"] and total != out["amount_paise"]:
         out["amount_paise"] = None
@@ -133,9 +136,23 @@ def read_invoice(text, chat_fn=chat):
 
     email = str(got.get("sender_email") or "").lower()
     if re.fullmatch(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", email) and email in text.lower():
-        # Keep every sender seen: an extra domain can only make the check stricter.
-        out["sender_domains"] = sorted({*out["sender_domains"], email.split("@")[1]})
+        # Keep every sender seen: an extra address can only make the check stricter.
+        out["sender_emails"] = sorted({*out["sender_emails"], email})
     suspicious = got.get("suspicious_text")
     if isinstance(suspicious, str) and suspicious.strip() and " ".join(suspicious.split()) in " ".join(text.split()):
         notes.append(f"Text trying to influence processing, ignored: {suspicious.strip()[:160]}")
     return out
+
+
+def logged_reader(db, run_id):
+    """A read function for ingest() that records each model call in the ledger."""
+    def read(text):
+        fields = read_invoice(text)
+        usage = fields.get("usage") or {}
+        prompt, completion = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+        usd = prompt * USD_PER_TOKEN["prompt"] + completion * USD_PER_TOKEN["completion"]
+        with db:
+            db.execute("INSERT INTO ledger(run_id, source, request, credits, outcome, at, usd) VALUES(?,?,?,?,?,?,?)",
+                       (run_id, "model", MODEL, 0, f"{prompt}+{completion} tokens" if usage else "unavailable", now(), usd))
+        return fields
+    return read

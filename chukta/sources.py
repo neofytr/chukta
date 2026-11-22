@@ -52,6 +52,7 @@ class Sources:
         self.deadline = time.monotonic() + time_limit_s
         self.transport, self.sleep = transport, sleep
         self.last_call = {}
+        self.down = {}  # A source that failed stays failed for this run, so an outage cannot burn the time limit.
 
     def spent(self):
         row = self.db.execute("SELECT COALESCE(SUM(credits), 0) FROM ledger WHERE run_id=?",
@@ -84,6 +85,15 @@ class Sources:
         self.last_call[label] = time.monotonic()
 
     def _request(self, source, label, url, payload=None, estimate=0.0, missing_ok=False):
+        if source in self.down:
+            raise SourceDown(self.down[source])
+        try:
+            return self._attempt(source, label, url, payload, estimate, missing_ok)
+        except SourceDown as e:
+            self.down[source] = str(e)
+            raise
+
+    def _attempt(self, source, label, url, payload, estimate, missing_ok):
         if time.monotonic() > self.deadline:
             raise SourceDown("run time limit reached")
         if self.spent() + estimate > self.credit_limit:
@@ -166,13 +176,18 @@ class Sources:
                     match = None
                     if matches:
                         info = matches[0]["company_data"]["basic_info"]
+                        if not (isinstance(info["name"], str) and info["name"].strip()):
+                            raise ValueError("no company name")
                         match = {"id": matches[0]["company_data"]["crustdata_company_id"],
                                  "name": info["name"], "domain": info.get("primary_domain"),
-                                 "confidence": matches[0].get("confidence_score")}
+                                 "all_domains": info.get("all_domains") or [],
+                                 "confidence": _number(matches[0].get("confidence_score"))}
                     out[domain] = {"match": match, "retrieved_at": time.strftime("%Y-%m-%d")}
-                    self._store(f"identify:{domain}", out[domain])
-            except (KeyError, TypeError, AttributeError, IndexError) as e:
-                raise SourceDown(f"Crustdata identify returned an unexpected shape: {e}") from e
+            except (KeyError, TypeError, AttributeError, IndexError, ValueError) as e:
+                self.down["crustdata"] = "Crustdata returned an unusable record"
+                raise SourceDown(self.down["crustdata"]) from e
+            for domain in chunk:  # Stored only after the whole reply validates.
+                self._store(f"identify:{domain}", out[domain])
         return out
 
     def identify(self, domain):
