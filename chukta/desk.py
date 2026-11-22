@@ -3,13 +3,15 @@
 Decisions are fixed policy over evidence. No model output can move money.
 State: NEW -> READY | HELD | BLOCKED -> APPROVED -> PAID, or -> REJECTED.
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import re
 import sqlite3
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from .sources import SourceDown
@@ -18,25 +20,30 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS vendors(client_id TEXT NOT NULL, gstin TEXT NOT NULL, name TEXT NOT NULL, domain TEXT NOT NULL,
     account TEXT NOT NULL, ifsc TEXT NOT NULL, emails TEXT NOT NULL DEFAULT '[]', aliases TEXT NOT NULL DEFAULT '[]',
-    onboarded_at TEXT, PRIMARY KEY(client_id, gstin));
+    onboarded_at TEXT, msme TEXT, agreement_days INTEGER, tds_class TEXT, payee_type TEXT NOT NULL DEFAULT 'other',
+    gst_filing TEXT NOT NULL DEFAULT 'monthly', PRIMARY KEY(client_id, gstin));
 CREATE TABLE IF NOT EXISTS pos(client_id TEXT NOT NULL, po TEXT NOT NULL, gstin TEXT NOT NULL, amount_paise INTEGER NOT NULL,
     PRIMARY KEY(client_id, po));
 CREATE TABLE IF NOT EXISTS invoices(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, raw TEXT NOT NULL, raw_hash TEXT NOT NULL,
-    fields TEXT NOT NULL, gstin TEXT, po TEXT, amount_paise INTEGER, invoice_date TEXT, fy TEXT, number_core INTEGER,
-    fingerprint TEXT, state TEXT NOT NULL DEFAULT 'NEW', payment_ref TEXT, UNIQUE(client_id, raw_hash));
+    fields TEXT NOT NULL, gstin TEXT, po TEXT, amount_paise INTEGER, taxable_paise INTEGER, tax_paise INTEGER, due_date TEXT,
+    invoice_date TEXT, fy TEXT, number_core INTEGER, fingerprint TEXT, state TEXT NOT NULL DEFAULT 'NEW', payment_ref TEXT, UNIQUE(client_id, raw_hash));
 CREATE TABLE IF NOT EXISTS findings(invoice_id INTEGER NOT NULL, check_name TEXT NOT NULL, status TEXT NOT NULL,
     severity TEXT NOT NULL, detail TEXT NOT NULL, source TEXT NOT NULL, retrieved_at TEXT NOT NULL,
     PRIMARY KEY(invoice_id, check_name));
 CREATE TABLE IF NOT EXISTS payment_orders(invoice_id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
     payee_gstin TEXT NOT NULL, payee_name TEXT NOT NULL, account TEXT NOT NULL, ifsc TEXT NOT NULL, gross_paise INTEGER NOT NULL,
-    tds_paise INTEGER NOT NULL, net_paise INTEGER NOT NULL, evidence_hash TEXT NOT NULL, approved_by TEXT NOT NULL, at TEXT NOT NULL);
+    tds_paise INTEGER NOT NULL, retained_gst_paise INTEGER NOT NULL, net_paise INTEGER NOT NULL, evidence_hash TEXT NOT NULL, approved_by TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL, event TEXT NOT NULL, actor TEXT NOT NULL,
     detail TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, source TEXT NOT NULL, request TEXT NOT NULL,
     credits REAL NOT NULL, outcome TEXT NOT NULL, at TEXT NOT NULL, usd REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS source_cache(key TEXT PRIMARY KEY, body TEXT NOT NULL, retrieved_at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS sandbox_payments(idempotency_key TEXT PRIMARY KEY, ref TEXT NOT NULL, account TEXT NOT NULL,
-    ifsc TEXT NOT NULL, amount_paise INTEGER NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS provider_payments(idempotency_key TEXT PRIMARY KEY, provider TEXT NOT NULL, ref TEXT NOT NULL,
+    account TEXT NOT NULL, ifsc TEXT NOT NULL, amount_paise INTEGER NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS gstr2b(client_id TEXT NOT NULL, period TEXT NOT NULL, gstin TEXT NOT NULL, number_key TEXT NOT NULL,
+    invoice_date TEXT NOT NULL, value_paise INTEGER NOT NULL, PRIMARY KEY(client_id, period, gstin, number_key));
+CREATE TABLE IF NOT EXISTS gstr2b_imports(client_id TEXT NOT NULL, period TEXT NOT NULL, imported_at TEXT NOT NULL,
+    PRIMARY KEY(client_id, period));
 """
 REQUIRED = ("invoice_no", "invoice_date", "amount_paise", "gstin")
 # A person cannot approve past these. The document must be corrected or rejected.
@@ -55,6 +62,10 @@ DATE = r"(\d{1,2}(?:st|nd|rd|th)?[ /.-]+(?:[A-Za-z]{3,9}|\d{1,2})[ /.,-]+\d{4}|\
 
 class PaymentConflict(Exception):
     pass
+
+
+class PaymentUnavailable(Exception):
+    """The provider gave no clear answer. The invoice stays APPROVED and the next run asks again."""
 
 
 def connect(path):
@@ -78,11 +89,12 @@ def add_client(db, client_id, name):
         db.execute("INSERT OR REPLACE INTO clients VALUES(?,?)", (client_id, name))
 
 
-def add_vendor(db, client_id, gstin, name, domain, account, ifsc, emails=(), aliases=(), onboarded_at=None):
+def add_vendor(db, client_id, gstin, name, domain, account, ifsc, emails=(), aliases=(), onboarded_at=None, msme=None,
+               agreement_days=None, tds_class=None, payee_type="other", gst_filing="monthly"):
     with db:
-        db.execute("INSERT OR REPLACE INTO vendors VALUES(?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT OR REPLACE INTO vendors VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (client_id, gstin, name, domain.lower(), account, ifsc, json.dumps([e.lower() for e in emails]),
-                    json.dumps(list(aliases)), onboarded_at))
+                    json.dumps(list(aliases)), onboarded_at, msme, agreement_days, tds_class, payee_type, gst_filing))
 
 
 def add_po(db, client_id, po, gstin, amount_paise):
@@ -245,12 +257,39 @@ def financial_year(iso):
     return f"{start}-{(start + 1) % 100:02d}"
 
 
+def number_key(invoice_no):
+    return "|".join(str(int(p)) if p.isdigit() else p for p in re.findall(r"[A-Z]+|\d+", str(invoice_no).upper()))
+
+
 def fingerprint(client_id, gstin, invoice_no, iso_date):
     """INV-0042, inv 42 and INV/42 from one vendor in one financial year are the same invoice."""
     if not (gstin and invoice_no and iso_date):
         return None
-    parts = [str(int(p)) if p.isdigit() else p for p in re.findall(r"[A-Z]+|\d+", invoice_no.upper())]
-    return hashlib.sha256(f"{client_id}|{gstin}|{financial_year(iso_date)}|{'|'.join(parts)}".encode()).hexdigest()
+    return hashlib.sha256(f"{client_id}|{gstin}|{financial_year(iso_date)}|{number_key(invoice_no)}".encode()).hexdigest()
+
+
+def import_gstr2b(db, client_id, doc):
+    """Reads the portal's JSON shape. One unusable record rejects the whole file."""
+    try:
+        data = doc.get("data", doc)
+        period_raw = str(data["rtnprd"])
+        if not re.fullmatch(r"(0[1-9]|1[0-2])\d{4}", period_raw):
+            raise ValueError("bad return period")
+        period = f"{period_raw[2:]}-{period_raw[:2]}"
+        rows = []
+        for supplier in data["docdata"]["b2b"]:
+            for item in supplier["inv"]:
+                iso, paise = _date(item["dt"]), _paise(str(item["val"]))
+                if not iso or paise is None:
+                    raise ValueError("bad invoice record")
+                rows.append((client_id, period, supplier["ctin"].upper(), number_key(item["inum"]), iso, paise))
+    except (KeyError, TypeError, AttributeError, ValueError) as e:
+        raise ValueError(f"Not a usable GSTR-2B file: {e}") from e
+    with db:
+        db.execute("DELETE FROM gstr2b WHERE client_id=? AND period=?", (client_id, period))
+        db.executemany("INSERT OR REPLACE INTO gstr2b VALUES(?,?,?,?,?,?)", rows)
+        db.execute("INSERT OR REPLACE INTO gstr2b_imports VALUES(?,?,?)", (client_id, period, now()))
+    return period, len(rows)
 
 
 def ingest(db, client_id, raw, read=parse):
@@ -262,10 +301,10 @@ def ingest(db, client_id, raw, read=parse):
     f = read(raw)
     digits = re.findall(r"\d+", f["invoice_no"] or "")
     with db:
-        db.execute("INSERT OR IGNORE INTO invoices(client_id, raw, raw_hash, fields, gstin, po, amount_paise, invoice_date, fy, "
-                   "number_core, fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                   (client_id, raw, digest, json.dumps(f), f["gstin"], f["po"], f["amount_paise"], f["invoice_date"],
-                    financial_year(f["invoice_date"]) if f["invoice_date"] else None, int(digits[-1]) if digits else None,
+        db.execute("INSERT OR IGNORE INTO invoices(client_id, raw, raw_hash, fields, gstin, po, amount_paise, taxable_paise, tax_paise, "
+                   "invoice_date, fy, number_core, fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (client_id, raw, digest, json.dumps(f), f["gstin"], f["po"], f["amount_paise"], f["taxable_paise"], f["tax_paise"],
+                    f["invoice_date"], financial_year(f["invoice_date"]) if f["invoice_date"] else None, int(digits[-1]) if digits else None,
                     fingerprint(client_id, f["gstin"], f["invoice_no"], f["invoice_date"])))
     return db.execute("SELECT id FROM invoices WHERE client_id=? AND raw_hash=?", (client_id, digest)).fetchone()[0]
 
@@ -323,7 +362,93 @@ def _rupees(paise):
     return f"₹{text}.{frac:02d}"
 
 
-def run_checks(db, src, inv):
+def msme_due(vendor, invoice_date):
+    """Section 15 runs from acceptance. ponytail: uses invoice date, the earliest case, until goods-receipt dates exist."""
+    if not vendor or vendor["msme"] not in ("micro", "small") or not invoice_date:
+        return None
+    days = min(vendor["agreement_days"] or 15, 45)
+    return (date.fromisoformat(invoice_date) + timedelta(days=days)).isoformat()
+
+
+def _check_msme(add, vendor, inv, as_of):
+    source = "vendors.msme; Income-tax Act 1961 s.43B(h) and its 2025 Act equivalent; MSMED Act s.15"
+    kind = vendor["msme"]
+    if kind is None:
+        add("msme", "info", "I can't verify MSME status: the vendor master has no Udyam details.", "vendors.msme")
+    elif kind == "trader":
+        add("msme", "info", "Registered as a trader. Whether the payment deadline applies needs a person's review.", source)
+    elif kind not in ("micro", "small"):
+        add("msme", "info", f"Vendor is {kind}, so the micro and small enterprise deadline does not apply.", "vendors.msme")
+    elif inv["invoice_date"]:
+        due = msme_due(vendor, inv["invoice_date"])
+        left = (date.fromisoformat(due) - date.fromisoformat(as_of)).days
+        state = f"overdue by {-left} days, so the tax deduction moves to the year it is paid" if left < 0 else f"{left} days left"
+        add("msme", "info", f"{kind.title()} enterprise. Pay by {due} ({state}).", source)
+
+
+TDS_THRESHOLD_PAISE = {"contractor": 100_000_00, "professional": 50_000_00, "technical": 50_000_00}
+
+
+def compute_tds(db, vendor, inv):
+    """Returns (paise or None, status, detail). Always a draft for the reviewer to confirm."""
+    kind = vendor["tds_class"]
+    if kind == "goods":
+        return 0, "info", "Goods purchase. No contractor or professional TDS is drafted."
+    if kind not in TDS_THRESHOLD_PAISE:
+        return None, "unverified", "I can't verify TDS: the vendor master has no payment category."
+    base = inv["taxable_paise"]
+    if not base:
+        return None, "unverified", "I can't verify TDS: the taxable value is unclear."
+    prior = db.execute("SELECT COALESCE(SUM(taxable_paise), 0) FROM invoices WHERE client_id=? AND gstin=? AND fy=? AND id<? AND state IN "
+                       "('READY','HELD','APPROVED','PAID') AND id NOT IN (SELECT invoice_id FROM findings WHERE check_name='duplicate' "
+                       "AND status='fail')", (inv["client_id"], inv["gstin"], inv["fy"], inv["id"])).fetchone()[0]
+    limit = TDS_THRESHOLD_PAISE[kind]
+    if kind == "contractor":
+        basis_points, entry = (100 if vendor["payee_type"] == "individual" else 200), "6(i)"
+        exempt = base <= 30_000_00 and prior + base <= limit
+    else:
+        basis_points, entry = (1000 if kind == "professional" else 200), "6(iii)"
+        exempt = prior + base <= limit
+    if exempt:
+        return 0, "pass", f"Draft TDS nil: below the threshold in s.393(1) Table {entry}."
+    tds = (base * basis_points // 10000 + 50) // 100 * 100  # Nearest rupee.
+    detail = f"Draft TDS {_rupees(tds)}: {basis_points / 100:g}% of {_rupees(base)} under s.393(1) Table {entry}."
+    if 0 < prior <= limit < prior + base:
+        return tds, "unverified", f"{detail} The financial-year total just crossed {_rupees(limit)}, so earlier invoices may need TDS too."
+    return tds, "pass", detail
+
+
+def _check_gst(add, db, inv, f, vendor):
+    if not (inv["gstin"] and f.get("invoice_no") and inv["invoice_date"]):
+        return
+    period = inv["invoice_date"][:7]
+    year, month = int(period[:4]), int(period[5:])
+    if vendor and vendor["gst_filing"] == "quarterly":  # A quarterly filer's invoices appear after the quarter ends.
+        month = ((month - 1) // 3 + 1) * 3
+    closes = f"{year}-{month:02d}"
+    tax = inv["tax_paise"] or 0
+    found = db.execute("SELECT period, value_paise FROM gstr2b WHERE client_id=? AND gstin=? AND number_key=? ORDER BY period LIMIT 1",
+                       (inv["client_id"], inv["gstin"], number_key(f["invoice_no"]))).fetchone()
+    if found:
+        source = f"gstr2b:{found['period']}:{inv['gstin']}:{number_key(f['invoice_no'])}.val"
+        if inv["amount_paise"] is not None and abs(found["value_paise"] - inv["amount_paise"]) > 100:
+            add("gst", "fail", f"GSTR-2B for {found['period']} shows {_rupees(found['value_paise'])}, the invoice says "
+                f"{_rupees(inv['amount_paise'])}.", source)
+        else:
+            add("gst", "pass", f"Matches the supplier's filing in GSTR-2B for {found['period']}.", source)
+        return
+    imported = db.execute("SELECT imported_at FROM gstr2b_imports WHERE client_id=? AND period=?", (inv["client_id"], closes)).fetchone()
+    if imported:
+        add("gst", "fail", f"Not in the imported GSTR-2B for {closes}. {_rupees(tax)} of GST credit is at risk. "
+            "Consider retaining the GST until the supplier files.", f"gstr2b_imports:{closes}", imported["imported_at"][:10])
+    else:
+        next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
+        add("gst", "info", f"GST credit pending: GSTR-2B for {closes} is expected from {next_year}-{next_month:02d}-14 and is not imported yet.",
+            "gstr2b_imports")
+
+
+def run_checks(db, src, inv, as_of=None):
+    as_of = as_of or today()
     f = json.loads(inv["fields"])
     client = inv["client_id"]
     out = []
@@ -416,9 +541,13 @@ def run_checks(db, src, inv):
         except SourceDown as e:
             add("ifsc", "unverified", f"I can't verify the IFSC: {e}.", "ifsc.razorpay.com")
 
+    _check_gst(add, db, inv, f, vendor)
     if vendor:
         _check_sender(add, vendor, f["sender_emails"])
         _check_company(add, src, vendor)
+        _check_msme(add, vendor, inv, as_of)
+        _, tds_status, tds_detail = compute_tds(db, vendor, inv)
+        add("tds", tds_status, tds_detail, "vendors.tds_class; Income-tax Act 2025 s.393")
     return out
 
 
@@ -485,7 +614,7 @@ def decide(findings):
     return "HELD" if any(row[2] not in OK_STATUSES for row in findings) else "READY"
 
 
-def process(db, src):
+def process(db, src, as_of=None):
     """Check every NEW invoice. A crash leaves it NEW, and cached sources make the rerun free."""
     new = db.execute("SELECT * FROM invoices WHERE state='NEW' ORDER BY id").fetchall()
     domains = {r["domain"] for i in new if i["gstin"] for r in
@@ -497,7 +626,7 @@ def process(db, src):
             pass  # Each invoice then records the outage in its own finding and is held.
     for inv in new:
         try:
-            findings = run_checks(db, src, inv)
+            findings = run_checks(db, src, inv, as_of)
         except (KeyError, TypeError, ValueError, AttributeError, IndexError, sqlite3.DataError) as e:
             # One unreadable record must not stop the batch or be read as clean.
             findings = [(inv["id"], "internal", "unverified", "hold", f"I can't verify this invoice: checks stopped ({type(e).__name__}).",
@@ -506,7 +635,9 @@ def process(db, src):
             db.execute("DELETE FROM findings WHERE invoice_id=?", (inv["id"],))
             db.executemany("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)", findings)
             state = decide(findings)
-            db.execute("UPDATE invoices SET state=? WHERE id=? AND state='NEW'", (state, inv["id"]))
+            vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
+            db.execute("UPDATE invoices SET state=?, due_date=? WHERE id=? AND state='NEW'",
+                       (state, msme_due(vendor, inv["invoice_date"]), inv["id"]))
             _event(db, inv["id"], "checked", "chukta", state)
 
 
@@ -514,7 +645,7 @@ def _event(db, invoice_id, event, actor, detail):
     db.execute("INSERT INTO events(invoice_id, event, actor, detail, at) VALUES(?,?,?,?,?)", (invoice_id, event, actor, detail, now()))
 
 
-def approve(db, invoice_id, by, note=""):
+def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=False):
     """A named person signs. The exact payee and amount are frozen here, and payment uses only this record."""
     if not by.strip():
         raise ValueError("approval needs a named person")
@@ -544,12 +675,27 @@ def approve(db, invoice_id, by, note=""):
         rows = [tuple(r) for r in db.execute("SELECT check_name, status, detail, source, retrieved_at FROM findings "
                                              "WHERE invoice_id=? ORDER BY check_name", (invoice_id,))]
         evidence = hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
-        tds = 0  # ponytail: TDS arrives in M2 and changes net here, inside the frozen order.
-        db.execute("INSERT OR REPLACE INTO payment_orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        tds = compute_tds(db, vendor, inv)[0]
+        if tds_override_paise is not None:
+            if tds_override_paise < 0 or not note.strip():
+                raise ValueError("changing the TDS draft needs a valid amount and a note")
+            tds = tds_override_paise
+        if tds is None:
+            raise ValueError(f"invoice {invoice_id}: TDS is unverified, so a person must enter the amount")
+        retained = 0
+        if retain_gst:
+            if not inv["tax_paise"]:
+                raise ValueError(f"invoice {invoice_id} has no GST amount to retain")
+            retained = inv["tax_paise"]
+        net = inv["amount_paise"] - tds - retained
+        if net <= 0:
+            raise ValueError(f"invoice {invoice_id}: net payable must be above zero")
+        db.execute("INSERT OR REPLACE INTO payment_orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (invoice_id, inv["client_id"], f"chukta:{inv['fingerprint']}", vendor["gstin"], vendor["name"], vendor["account"],
-                    vendor["ifsc"], inv["amount_paise"], tds, inv["amount_paise"] - tds, evidence, by, now()))
+                    vendor["ifsc"], inv["amount_paise"], tds, retained, net, evidence, by, now()))
         db.execute("UPDATE invoices SET state='APPROVED' WHERE id=?", (invoice_id,))
-        _event(db, invoice_id, "approved", by, note or "clean invoice")
+        _event(db, invoice_id, "approved", by, f"{note or 'clean invoice'} | gross {_rupees(inv['amount_paise'])}, TDS {_rupees(tds)}, "
+               f"GST retained {_rupees(retained)}, net {_rupees(net)}")
 
 
 def reject(db, invoice_id, by, reason):
@@ -571,7 +717,7 @@ def recheck(db, src, invoice_id, by):
         if not inv or inv["state"] not in ("READY", "HELD", "BLOCKED", "APPROVED"):
             raise ValueError(f"invoice {invoice_id} cannot be rechecked")
         order = db.execute("SELECT idempotency_key FROM payment_orders WHERE invoice_id=?", (invoice_id,)).fetchone()
-        if order and db.execute("SELECT 1 FROM sandbox_payments WHERE idempotency_key=?", (order[0],)).fetchone():
+        if order and db.execute("SELECT 1 FROM provider_payments WHERE idempotency_key=?", (order[0],)).fetchone():
             raise ValueError(f"invoice {invoice_id} already has a payment. Run the payment step to record it.")
         db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (invoice_id,))
         db.execute("UPDATE invoices SET state='NEW' WHERE id=?", (invoice_id,))
@@ -588,30 +734,47 @@ class SandboxBank:
 
     def pay(self, key, account, ifsc, amount_paise):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO sandbox_payments VALUES(?,?,?,?,?,?)",
-                            (key, f"sandbox_{uuid.uuid4().hex[:12]}", account, ifsc, amount_paise, now()))
-        row = self.db.execute("SELECT * FROM sandbox_payments WHERE idempotency_key=?", (key,)).fetchone()
+            self.db.execute("INSERT OR IGNORE INTO provider_payments VALUES(?,?,?,?,?,?,?)",
+                            (key, "sandbox", f"sandbox_{uuid.uuid4().hex[:12]}", account, ifsc, amount_paise, now()))
+        row = self.db.execute("SELECT * FROM provider_payments WHERE idempotency_key=?", (key,)).fetchone()
         if (row["account"], row["ifsc"], row["amount_paise"]) != (account, ifsc, amount_paise):
             raise PaymentConflict(key)
         return row["ref"]
 
 
+@contextlib.contextmanager
+def _pay_lock(db):
+    """One payer at a time. The OS releases this lock if the process is killed."""
+    path = db.execute("PRAGMA database_list").fetchone()["file"]
+    if not path:
+        yield
+        return
+    with open(path + ".paylock", "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def pay_approved(db, bank):
     """Pays only the frozen order, never the current master or the invoice text."""
-    orders = db.execute("SELECT o.* FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.state='APPROVED' "
-                        "ORDER BY o.invoice_id").fetchall()
-    for o in orders:
-        try:
-            ref = bank.pay(o["idempotency_key"], o["account"], o["ifsc"], o["net_paise"])
-        except PaymentConflict:
+    with _pay_lock(db):
+        orders = db.execute("SELECT o.* FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.state='APPROVED' "
+                            "ORDER BY COALESCE(i.due_date, '9999'), o.invoice_id").fetchall()
+        for o in orders:
+            try:
+                ref = bank.pay(o["idempotency_key"], o["account"], o["ifsc"], o["net_paise"])
+            except PaymentUnavailable as e:
+                with db:
+                    _event(db, o["invoice_id"], "payment_retry_needed", "chukta", str(e))
+                continue
+            except PaymentConflict:
+                with db:
+                    db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)",
+                               (o["invoice_id"], "payment_conflict", "fail", "hold",
+                                "A payment with this key already exists for different details.", "provider_payments", today()))
+                    db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (o["invoice_id"],))
+                    db.execute("UPDATE invoices SET state='HELD' WHERE id=? AND state='APPROVED'", (o["invoice_id"],))
+                    _event(db, o["invoice_id"], "payment_conflict", "chukta", o["idempotency_key"])
+                continue
             with db:
-                db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)",
-                           (o["invoice_id"], "payment_conflict", "fail", "hold",
-                            "A payment with this key already exists for different details.", "sandbox_payments", today()))
-                db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (o["invoice_id"],))
-                db.execute("UPDATE invoices SET state='HELD' WHERE id=? AND state='APPROVED'", (o["invoice_id"],))
-                _event(db, o["invoice_id"], "payment_conflict", "chukta", o["idempotency_key"])
-            continue
-        with db:
-            db.execute("UPDATE invoices SET state='PAID', payment_ref=? WHERE id=? AND state='APPROVED'", (ref, o["invoice_id"]))
-            _event(db, o["invoice_id"], "paid", "chukta", ref)
+                db.execute("UPDATE invoices SET state='PAID', payment_ref=? WHERE id=? AND state='APPROVED'", (ref, o["invoice_id"]))
+                _event(db, o["invoice_id"], "paid", "chukta", ref)

@@ -6,8 +6,9 @@ import subprocess
 import sys
 import tempfile
 
-from chukta.desk import (PaymentConflict, SandboxBank, add_client, add_po, add_vendor, approve, connect, gstin_check, gstin_valid,
-                         imitates, ingest, parse, pay_approved, process, recheck, reject, same_company)
+from chukta.desk import (PaymentConflict, PaymentUnavailable, SandboxBank, add_client, add_po, add_vendor, approve, connect, gstin_check,
+                         gstin_valid, imitates, import_gstr2b, ingest, parse, pay_approved, process, recheck, reject, same_company)
+from chukta.razorpay import RazorpayBank
 from chukta.reader import ReaderDown, read_invoice
 from chukta.sources import Sources
 
@@ -35,17 +36,19 @@ class Net:
         if self.crust_down:
             raise TimeoutError
         domains = json.loads(body)["domains"]
+        if bad := [d for d in domains if d in getattr(self, "invalid", ())]:
+            return 400, {}, json.dumps({"error": {"type": "invalid_request", "message": f"Invalid company domains: {', '.join(bad)}"}}).encode()
         hit = [{"confidence_score": self.match["confidence"], "company_data": {"crustdata_company_id": 7, "basic_info": {
             "name": self.match["name"], "primary_domain": domains[0]}}}] if self.match else []
         rows = [{"matched_on": d, "match_type": "domain", "matches": hit} for d in domains]
         return 200, {"x-credits-used": str(0.2 * len(domains))}, json.dumps(rows).encode()
 
 
-def desk(net=None, limit=10.0, keys=("k1",), domain="acmetools.in", onboarded="2026-01-01", path=":memory:"):
+def desk(net=None, limit=10.0, keys=("k1",), domain="acmetools.in", onboarded="2026-01-01", path=":memory:", **vendor_fields):
     db = connect(path)
     add_client(db, "c1", "Kaveri Foods")
     add_vendor(db, "c1", ACME, "Acme Tools Private Limited", domain, ACCOUNT, IFSC, emails=["acme.billing@gmail.com"],
-               onboarded_at=onboarded)
+               onboarded_at=onboarded, **({"tds_class": "goods"} | vendor_fields))
     add_po(db, "c1", "PO-1001", ACME, 20000000)
     net = net or Net()
     return db, net, Sources(db, "t", keys=keys, credit_limit=limit, transport=net, sleep=lambda s: None)
@@ -78,7 +81,7 @@ def run(text, **kw):
 
 
 def payments(db):
-    return db.execute("SELECT COUNT(*) FROM sandbox_payments").fetchone()[0]
+    return db.execute("SELECT COUNT(*) FROM provider_payments").fetchone()[0]
 
 
 # Parsing and GSTIN
@@ -162,7 +165,7 @@ process(db, src)
 approve(db, i, "tester")
 add_vendor(db, "c1", ACME, "Acme Tools Private Limited", "acmetools.in", "77777777777777", IFSC)
 pay_approved(db, SandboxBank(db))
-assert db.execute("SELECT account FROM sandbox_payments").fetchone()[0] == ACCOUNT, "pays the signed account"
+assert db.execute("SELECT account FROM provider_payments").fetchone()[0] == ACCOUNT, "pays the signed account"
 bank = SandboxBank(db)
 bank.pay("k", ACCOUNT, IFSC, 100)
 try:
@@ -229,13 +232,13 @@ db, net, src = desk()
 i = ingest(db, "c1", invoice(account="60100123456789"))
 process(db, src)
 assert state(db, i) == "BLOCKED"
-add_vendor(db, "c1", ACME, "Acme Tools Private Limited", "acmetools.in", "60100123456789", IFSC, onboarded_at="2026-01-01")
+add_vendor(db, "c1", ACME, "Acme Tools Private Limited", "acmetools.in", "60100123456789", IFSC, onboarded_at="2026-01-01", tds_class="goods")
 assert recheck(db, src, i, "tester") == "READY", "master corrected by a person"
 
 # Client isolation
 db, net, src = desk()
 add_client(db, "c2", "Other Client")
-add_vendor(db, "c2", ACME, "Acme Tools Private Limited", "acmetools.in", ACCOUNT, IFSC, onboarded_at="2026-01-01")
+add_vendor(db, "c2", ACME, "Acme Tools Private Limited", "acmetools.in", ACCOUNT, IFSC, onboarded_at="2026-01-01", tds_class="goods")
 add_po(db, "c2", "PO-1001", ACME, 20000000)
 one, two = ingest(db, "c1", invoice()), ingest(db, "c2", invoice())
 process(db, src)
@@ -296,6 +299,123 @@ net = Net()
 net.statuses = [402]
 assert run(invoice(), net=net, keys=("k1", "k2"))[2] == "READY"
 assert net.keys == ["Bearer k1", "Bearer k2"]
+
+# GSTR-2B: a match, a closed-period miss, and an open period are three different answers
+TWO_B = {"data": {"rtnprd": "102026", "docdata": {"b2b": [{"ctin": ACME, "inv": [{"inum": "INV/42", "dt": "07-10-2026", "val": 118000}]}]}}}
+db, net, src = desk()
+assert import_gstr2b(db, "c1", TWO_B) == ("2026-10", 1)
+matched = ingest(db, "c1", invoice())
+missing = ingest(db, "c1", invoice(no="N-9", day="20 Oct 2026", taxable="10,000.00", tax="1,800.00", total="11,800.00"))
+process(db, src)
+assert state(db, matched) == "READY" and state(db, missing) == "HELD"
+assert refuses(approve, db, missing, "tester")
+approve(db, missing, "tester", "vendor confirmed filing is late", retain_gst=True)
+assert db.execute("SELECT net_paise FROM payment_orders WHERE invoice_id=?", (missing,)).fetchone()[0] == 1000000, "GST retained"
+db, i, s = run(invoice())
+assert s == "READY" and db.execute("SELECT status FROM findings WHERE check_name='gst'").fetchone()[0] == "info", "open period is pending"
+db, net, src = desk()
+import_gstr2b(db, "c1", {"data": {"rtnprd": "102026", "docdata": {"b2b": [{"ctin": ACME, "inv": [{"inum": "INV-42", "dt": "07-10-2026", "val": 90000}]}]}}})
+i = ingest(db, "c1", invoice())
+process(db, src)
+assert state(db, i) == "HELD", "2B value differs"
+db, net, src = desk(gst_filing="quarterly")
+import_gstr2b(db, "c1", {"data": {"rtnprd": "102026", "docdata": {"b2b": []}}})
+i = ingest(db, "c1", invoice())
+process(db, src)
+assert state(db, i) == "READY", "quarterly filer is pending until December's statement"
+assert refuses(import_gstr2b, db, "c1", {"data": {"rtnprd": "132026", "docdata": {"b2b": []}}})
+assert refuses(import_gstr2b, db, "c1", {"data": {"rtnprd": "102026", "docdata": {"b2b": [{"ctin": ACME, "inv": [{"inum": "1", "dt": "soon", "val": 1}]}]}}})
+
+# MSME deadlines
+for fields, due in (({"msme": "micro"}, "2026-10-22"), ({"msme": "small", "agreement_days": 30}, "2026-11-06"),
+                    ({"msme": "small", "agreement_days": 90}, "2026-11-21"), ({"msme": "medium"}, None), ({}, None)):
+    db, i, s = run(invoice(), **fields)
+    assert s == "READY" and db.execute("SELECT due_date FROM invoices").fetchone()[0] == due, fields
+
+# TDS drafts change the net amount, and uncertainty goes to a person
+for fields, tds in (({"tds_class": "contractor"}, 200000), ({"tds_class": "contractor", "payee_type": "individual"}, 100000),
+                    ({"tds_class": "professional"}, 1000000), ({"tds_class": "technical"}, 200000)):
+    db, i, s = run(invoice(), **fields)
+    assert s == "READY", fields
+    approve(db, i, "tester")
+    got = db.execute("SELECT tds_paise, net_paise FROM payment_orders").fetchone()
+    assert (got[0], got[1]) == (tds, 11800000 - tds), fields
+db, i, s = run(invoice(taxable="20,000.00", tax="3,600.00", total="23,600.00"), tds_class="contractor")
+approve(db, i, "tester")
+assert db.execute("SELECT tds_paise FROM payment_orders").fetchone()[0] == 0, "below contractor threshold"
+db, net, src = desk(tds_class="contractor")
+ingest(db, "c1", invoice(no="T-1", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Jul 2026"))
+ingest(db, "c1", invoice(no="T-2", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Aug 2026"))
+ingest(db, "c1", invoice(no="T-3", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Sep 2026"))
+ingest(db, "c1", invoice(no="T-4", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Oct 2026"))
+crossing = ingest(db, "c1", invoice(no="T-5", taxable="20,000.00", tax="3,600.00", total="23,600.00", day="01 Nov 2026"))
+process(db, src)
+assert state(db, crossing) == "HELD", "annual contractor threshold crossed"
+db, i, s = run(invoice(), tds_class=None)
+assert s == "HELD" and refuses(approve, db, i, "tester", "checked")
+approve(db, i, "tester", "category confirmed", tds_override_paise=200000)
+assert db.execute("SELECT net_paise FROM payment_orders").fetchone()[0] == 11600000
+
+
+# Razorpay test mode: a crash between creating the order and recording it cannot create a second one
+class FakeRazorpay:
+    """Behaves as the live test API did: a repeated reference_id is a 400, and lookup by reference works."""
+
+    def __init__(self):
+        self.links, self.down = [], False
+
+    def __call__(self, method, url, headers, body, timeout=20):
+        if self.down:
+            raise TimeoutError
+        if method == "GET":
+            ref = url.split("reference_id=")[1]
+            return 200, {}, json.dumps({"payment_links": [l for l in self.links if l["reference_id"] == ref]}).encode()
+        link = json.loads(body)
+        if any(l["reference_id"] == link["reference_id"] for l in self.links):
+            return 400, {}, json.dumps({"error": {"description": "payment link with given reference_id: x already exists."}}).encode()
+        link |= {"id": f"plink_{len(self.links) + 1}", "status": "created"}
+        self.links.append(link)
+        return 200, {}, json.dumps(link).encode()
+
+
+assert refuses(RazorpayBank, connect(":memory:"), "rzp_live_abc", "s"), "live keys are refused"
+db = connect(":memory:")
+rzp = FakeRazorpay()
+bank = RazorpayBank(db, "rzp_test_abc", "s", rzp)
+ref = bank.pay("key-1", ACCOUNT, IFSC, 5000)
+db.execute("DELETE FROM provider_payments")
+db.commit()
+assert bank.pay("key-1", ACCOUNT, IFSC, 5000) == ref and len(rzp.links) == 1, "found by reference after a lost local record"
+try:
+    bank.pay("key-1", "77777777777777", IFSC, 5000)
+    raise AssertionError("same key with a different payee must fail")
+except PaymentConflict:
+    pass
+rzp.down = True
+try:
+    bank.pay("key-2", ACCOUNT, IFSC, 5000)
+    raise AssertionError("an outage must not look like success")
+except PaymentUnavailable:
+    pass
+db, net, src = desk()
+i = ingest(db, "c1", invoice())
+process(db, src)
+approve(db, i, "tester")
+rzp = FakeRazorpay()
+rzp.down = True
+pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", rzp))
+assert state(db, i) == "APPROVED", "stays approved through a provider outage"
+rzp.down = False
+pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", rzp))
+assert state(db, i) == "PAID" and len(rzp.links) == 1
+
+# One invalid domain does not cost the other vendors their company check
+net = Net()
+net.invalid = {"bad-domain.in"}
+db, _, src = desk(net=net)
+got = src.identify_many(["bad-domain.in", "acmetools.in", "fictional.test"])
+assert got["bad-domain.in"]["match"] is None and got["fictional.test"]["match"] is None and got["acmetools.in"]["match"]
+assert not src.down, "an invalid domain is not an outage"
 
 # The model reader: nothing it says is accepted unless the invoice text supports it
 MESSY = (f"fwd urgent. from - Ravi <ravi@acmetools.in>. GST no {ACME}. bill no KF/26-27/0091 dt 7th oct 2026 agnst po 1001. "

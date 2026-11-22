@@ -4,7 +4,7 @@ ContextCon 05 build, theme 6.1 (Buying and paying). Takes a week's invoices and 
 
 ## Read first
 
-`docs/PLAN.md` section 0 holds the Problem Statement, which overrides older plan sections. All teams serve one fictional 3PL client from the kickoff kit, and hidden test cases are run at screening.
+The owner decided the original handbook governs, not the later Problem Statement. See `docs/PLAN.md` section 0. Payments use Razorpay test mode, and `chukta/razorpay.py` refuses live keys.
 
 ## Hard rules from the handbook
 

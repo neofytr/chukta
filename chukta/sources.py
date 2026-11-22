@@ -20,6 +20,14 @@ class SourceDown(Exception):
     """A source gave no usable answer. Callers must hold, never treat this as a pass."""
 
 
+class InvalidDomains(Exception):
+    """Crustdata refused specific domains, and refuses the whole request with them."""
+
+    def __init__(self, domains):
+        super().__init__(", ".join(domains))
+        self.domains = domains
+
+
 def load_keys(path=pathlib.Path(__file__).parent.parent / ".env"):
     """Primary key first. Each spare is used only after the one before it returns 402."""
     env = dict(l.split("=", 1) for l in path.read_text().splitlines() if "=" in l)
@@ -132,6 +140,8 @@ class Sources:
                 last = "rate limited"
                 self.sleep(min(_number(h.get("x-ratelimit-reset"), 2 ** attempt) + 1, MAX_WAIT_S))
                 continue
+            elif status == 400 and source == "crustdata" and (m := re.search(r"Invalid company domains:\s*([^\"]+)", raw.decode("utf-8", "replace"))):
+                raise InvalidDomains([d.strip().lower() for d in m.group(1).split(",") if d.strip()])
             elif status < 500:
                 raise SourceDown(f"{source} returned HTTP {status}")
             else:
@@ -156,6 +166,21 @@ class Sources:
         self._store(key, value)
         return value
 
+    def _identify_chunk(self, chunk, out):
+        """One invalid domain must not cost the other vendors their check."""
+        while chunk:
+            try:
+                return chunk, self._request("crustdata", "/company/identify", API + "/company/identify",
+                                            {"domains": chunk}, estimate=0.2 * len(chunk))
+            except InvalidDomains as e:
+                left = [d for d in chunk if d not in e.domains]
+                if len(left) == len(chunk):
+                    raise SourceDown("Crustdata refused the domain list") from e
+                for domain in set(chunk) - set(left):
+                    out[domain] = {"match": None, "retrieved_at": time.strftime("%Y-%m-%d")}
+                chunk = left
+        return [], []
+
     def identify_many(self, domains):
         """Resolve domains to companies, up to 25 per call because identify is 5 RPM."""
         out, missing = {}, []
@@ -163,12 +188,12 @@ class Sources:
             hit = self._cached(f"identify:{domain}")
             if hit:
                 out[domain] = hit
+            elif domain.rsplit(".", 1)[-1] in ("test", "example", "invalid", "localhost"):
+                out[domain] = {"match": None, "retrieved_at": time.strftime("%Y-%m-%d")}
             else:
                 missing.append(domain)
         for i in range(0, len(missing), 25):
-            chunk = missing[i:i + 25]
-            rows = self._request("crustdata", "/company/identify", API + "/company/identify",
-                                 {"domains": chunk}, estimate=0.2 * len(chunk))
+            chunk, rows = self._identify_chunk(missing[i:i + 25], out)
             try:
                 by_domain = {r["matched_on"].lower(): r["matches"] for r in rows}
                 for domain in chunk:

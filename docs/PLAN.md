@@ -2,9 +2,13 @@
 
 Theme 6.1, The Payables Desk. Solo build. Code freeze 6:00 PM IST, 22 Nov 2026.
 
-## 0. Problem Statement update (read 10:50 AM). This overrides the sections below where they differ
+## 0. Decision at 11:12 AM: the original handbook governs
 
-**Binding changes**
+The owner chose the handbook over the later Problem Statement. That means our own public repo, the CA-firm buyer, the handbook rubric and video, and TDS, MSME and GSTR-2B in scope. Payments use Razorpay test mode.
+
+The notes below are context only, and useful preparation for judge questions.
+
+**What the Problem Statement said**
 
 - **One fictional client for all teams:** a mid-size Indian 3PL logistics company. Its name, records and requests come from the kickoff kit. Its counterparties are real companies. The CA-firm framing below is no longer the demo client.
 - **Hidden test set:** organizers run the service on unseen requests, using the kit's input and output formats. A wrong answer costs more than "cannot verify".
@@ -15,21 +19,14 @@ Theme 6.1, The Payables Desk. Solo build. Code freeze 6:00 PM IST, 22 Nov 2026.
 - **Finals (100):** live run 20, robustness 15, design 15, ethics 25, financial feasibility 25. Includes a kill on stage, a 5-minute live fix and one system design question, in a 12-minute slot.
 - **README must state:** the job and who pays today, input, finished result, pass mark, and each data source. The architecture diagram must live in the repo and show data calls, approvals, retries and the cost ledger.
 
-**Conflicts with the handbook, to confirm with organizers**
+**Build order now**
 
-| Topic | Handbook | Problem Statement |
-| - | - | - |
-| Repo | New public repo | Organizer repo received at kickoff |
-| Scoring | Five criteria, execution 25 | Five different areas, ethics and finance 25 each |
-| Finals slot | 2-minute demo, 1 minute of questions | 12-minute slot with live fix |
-
-**Revised order, once the kit arrives**
-
-1. Adapter for the kit's input and output formats, and a restartable runner.
-2. Bank-line posting and payee resolution, with a real source per payee.
-3. Provider test-mode payments.
-4. Measured cost per job, and the ethics story: personal data, approvals, explanations.
-5. Domain extras only if the kit's requests need them. TDS, MSME and GSTR-2B are paused until then.
+1. Compliance and Razorpay test mode. Done.
+2. Labelled weekly batch and evaluation script.
+3. Reviewer screen, sign-off, exports and audit replay.
+4. Exception investigator, with read-only tools and verified citations.
+5. README, diagram, video script.
+6. Stretch: bank-statement line posting, the handbook's example test case.
 
 ## 1. The service
 
