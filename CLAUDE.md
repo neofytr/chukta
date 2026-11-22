@@ -17,6 +17,8 @@ ContextCon 05 build, theme 6.1 (Buying and paying). Takes a week's invoices and 
 
 The keys live only in `.env` (gitignored, mode 600). Never print them, commit them, or put them in a tracked file. The two `CRUSTDATA_API_KEY_FALLBACK*` keys are spares: move to the next one after a 402 (credits exhausted). Do not rotate keys to get around a 429, because that evades Crustdata's rate limit. Batch instead. `docs/handbook/` and `docs/crustdata/` are also gitignored.
 
+The LLM (`LLM_BASE_URL`, model `deepseek/deepseek-v4.1-flash`) is on a free key whose requests may be stored. Send it fictional invoices only, never real client data.
+
 ## Where things are
 
 - `chukta/sources.py`: live data, with throttling, retries, cache and ledger
