@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chukta</title>
+<style>
+:root{--paper:#f5f2ea;--sheet:#fffdf8;--ink:#1c2723;--soft:#59655f;--line:#ddd7c9;--accent:#1d5c46;--accent-ink:#fff;--accent-tint:#e3efe8;--amber:#865400;--amber-tint:#f8ecd2;--red:#a12b20;--red-tint:#f9e2dd;--blue:#27587f;--blue-tint:#e2edf5;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--paper:#141a18;--sheet:#1c2422;--ink:#ecefe9;--soft:#a3aea8;--line:#35413c;--accent:#5fc29c;--accent-ink:#0d1f18;--accent-tint:#1d3a2f;--amber:#e8b95c;--amber-tint:#3b2f15;--red:#f28f82;--red-tint:#43221d;--blue:#8cc0e6;--blue-tint:#1c3243;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,input,textarea{font:inherit;color:inherit}h1,h2,h3{font-family:"Iowan Old Style",Georgia,serif;font-weight:600;margin:0}
+.wrap{max-width:1320px;margin:0 auto;padding:0 20px}header{border-bottom:1px solid var(--line);background:var(--sheet)}
+.bar{display:flex;align-items:baseline;gap:14px;padding:14px 0;flex-wrap:wrap}.brand{font-size:25px;letter-spacing:-.01em}.brand small{font:13px system-ui;color:var(--soft);margin-left:7px}
+.client{color:var(--soft)}.badge{margin-left:auto;font-size:12.5px;padding:3px 9px;border-radius:99px;background:var(--blue-tint);color:var(--blue)}
+main{padding:20px 0 120px}.request{display:grid;grid-template-columns:1fr auto;gap:16px;align-items:end;background:var(--sheet);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.label{display:block;font-size:12.5px;color:var(--soft);margin-bottom:4px}.request p{font-family:"Iowan Old Style",Georgia,serif;font-size:18px;line-height:1.4;margin:0;max-width:880px}
+.btn{border:1px solid var(--line);background:var(--sheet);border-radius:7px;padding:8px 14px;cursor:pointer;font-weight:550}.btn:hover{border-color:var(--soft)}.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}.btn.danger{color:var(--red)}.link{background:none;border:0;padding:0;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.paste{margin-top:10px}.paste textarea,.field textarea,.field input,.sign input{width:100%;background:var(--paper);border:1px solid var(--line);border-radius:7px;padding:8px 10px}.paste textarea{min-height:130px;font:13px ui-monospace,monospace;margin:8px 0}
+.status{min-height:24px;margin:10px 2px;color:var(--soft)}.status b{color:var(--accent)}.error{color:var(--red)}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid var(--line);border-radius:10px;background:var(--sheet);margin-bottom:16px}.stat{padding:11px 16px;border-left:1px solid var(--line)}.stat:first-child{border-left:0}.stat span{display:block;font-size:12.5px;color:var(--soft)}.stat b{font:600 22px "Iowan Old Style",Georgia,serif;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;align-items:start}.panel{background:var(--sheet);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.group{padding:10px 16px 5px;font-size:12.5px;font-weight:650;color:var(--soft);background:var(--paper);border-top:1px solid var(--line)}.group:first-child{border-top:0}
+.row{display:grid;grid-template-columns:82px minmax(0,1fr) auto;gap:10px;width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);padding:10px 16px;cursor:pointer}.group + .row{border-top:0}.row:hover{background:var(--paper)}.row[aria-current=true]{background:var(--accent-tint);box-shadow:inset 3px 0 0 var(--accent)}
+.vendor{font-weight:600}.sub{display:block;color:var(--soft);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.money{font-variant-numeric:tabular-nums;text-align:right;font-weight:600;white-space:nowrap}.money small{display:block;font-weight:400;color:var(--soft);font-size:12px}
+.tag{display:inline-block;font-size:11.5px;font-weight:650;padding:2px 7px;border-radius:5px;height:fit-content;text-align:center}.BLOCKED,.fail{background:var(--red-tint);color:var(--red)}.HELD,.unverified{background:var(--amber-tint);color:var(--amber)}.READY,.pass{background:var(--accent-tint);color:var(--accent)}.APPROVED,.info{background:var(--blue-tint);color:var(--blue)}.PAID{background:var(--accent);color:var(--accent-ink)}.REJECTED,.NEW{background:var(--paper);color:var(--soft)}
+.detail{position:sticky;top:12px;max-height:calc(100vh - 110px);overflow:auto;padding:18px}.empty{padding:60px 28px;text-align:center;color:var(--soft)}.head{display:flex;justify-content:space-between;gap:10px;align-items:start}.head h2{font-size:21px}
+.call{margin:14px 0;padding:12px 14px;border-radius:8px;background:var(--paper);border-left:3px solid var(--accent)}.call.block{border-color:var(--red)}.call.hold{border-color:var(--amber)}.call strong{display:block;margin-bottom:3px}.who{font-size:12px;color:var(--soft);margin-top:5px}
+.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 12px;margin:12px 0}.facts span{display:block;font-size:12px;color:var(--soft)}.facts b{font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+h3{font-size:16px;margin:17px 0 6px}.check{display:grid;grid-template-columns:82px minmax(0,1fr);gap:9px;padding:7px 0;border-top:1px solid var(--line)}.check p{margin:0}.src{font-size:12px;color:var(--soft);overflow-wrap:anywhere}.src a{color:var(--accent)}
+.field{margin-top:9px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.tick{display:flex;gap:7px;align-items:center;margin-top:8px}details{margin-top:12px}summary{cursor:pointer;color:var(--soft)}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--paper);padding:10px;border-radius:6px;font-size:12.5px;max-height:260px;overflow:auto}.log{font-size:13px;margin:0;padding-left:17px}
+.sign{position:fixed;bottom:0;left:0;right:0;background:var(--sheet);border-top:1px solid var(--line);box-shadow:0 -4px 16px #0000000f}.signin{display:flex;gap:12px;align-items:center;padding:11px 0;flex-wrap:wrap}.sign input{width:190px}.summary{margin-right:auto}.summary b{font-variant-numeric:tabular-nums}.exports{display:flex;gap:14px;font-size:13.5px;margin:13px 2px;flex-wrap:wrap;color:var(--soft)}.exports a{color:var(--accent)}
+@media(max-width:940px){.grid,.request{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.stat{border-left:0;border-top:1px solid var(--line)}.detail{position:static;max-height:none}main{padding-bottom:190px}.badge{margin-left:0}.wrap{padding:0 16px}.sign input{width:100%}.facts{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header><div class="wrap bar"><h1 class="brand">Chukta<small>चुकता, paid in full</small></h1><span class="client" id="client"></span><span class="badge" id="provider"></span></div></header>
+<main class="wrap">
+  <section class="request" aria-label="Client request">
+    <div><span class="label">The client's request</span><p>“Here are this week's invoices. Match each one to its PO, check the vendor and its bank account, work out TDS, pay each one once, and hold anything unusual for my approval with the reason.”</p>
+      <div class="paste"><button class="link" id="pasteToggle" aria-expanded="false">Run an invoice it has never seen</button>
+        <div id="pasteBox" hidden><label class="label" for="pasteText">Paste invoice or email text. Separate several with a line containing ---. Use fictional data only.</label><textarea id="pasteText"></textarea><button class="btn" id="runPaste">Run these invoices</button></div></div></div>
+    <button class="btn primary" id="runSample">Run this week's invoices</button>
+  </section>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+  <section class="stats" aria-label="Summary" id="stats"></section>
+  <div class="grid"><section class="panel" aria-label="Work queue" id="queue"></section><aside class="panel detail" aria-label="Invoice detail" id="detail"><div class="empty">Select an invoice to see the decision, reasons and evidence.</div></aside></div>
+  <div class="exports" id="exports"></div>
+</main>
+<section class="sign" aria-label="Sign-off"><div class="wrap signin"><div class="summary" id="signSummary"></div><div><label class="label" for="by" style="margin:0">Reviewer</label><input id="by" autocomplete="name" placeholder="Your name"></div><button class="btn" id="signoff">Sign off</button><button class="btn primary" id="pay">Release payments</button></div></section>
+<script>
+const $=id=>document.getElementById(id);let S=null,sel=null,lastKey="",msg="",bad=false;
+const h=(t,p={},...c)=>{const e=document.createElement(t);for(const[k,v]of Object.entries(p)){if(k==="class")e.className=v;else if(k.startsWith("on"))e.addEventListener(k.slice(2),v);else if(k==="value")e.value=v;else if(v===true)e.setAttribute(k,"");else if(v!==false&&v!=null)e.setAttribute(k,v)}e.append(...c.flat().filter(x=>x!==null&&x!==undefined&&x!==false));return e};
+const LABEL={BLOCKED:"Blocked",HELD:"Held",READY:"Ready",APPROVED:"Signed",PAID:"Paid",REJECTED:"Rejected",NEW:"Checking",pass:"Verified",fail:"Failed",unverified:"Can't verify",info:"Note"};
+const CHECK={required:"Fields",document:"Document",gstin:"GSTIN",vendor:"Vendor master",duplicate:"Duplicate",near_duplicate:"Near duplicate",po:"Purchase order",bank:"Bank details",bank_request:"Bank change",ifsc:"IFSC registry",gst:"GSTR-2B",sender:"Sender",company:"Company record",msme:"MSME deadline",tds:"TDS draft",internal:"System",payment_conflict:"Payment",payment:"Payment provider"};
+const GROUPS=[["Needs your decision",["BLOCKED","HELD"]],["Ready to sign",["READY"]],["Signed, waiting to pay",["APPROVED"]],["Paid",["PAID"]],["Rejected",["REJECTED"]],["Checking",["NEW"]]];
+const tag=s=>h("span",{class:"tag "+s},LABEL[s]||s);
+function say(t,isBad=false){msg=t;bad=isBad;paintStatus()}
+function paintStatus(){const j=S&&S.job,el=$("status");el.textContent="";if(j&&j.running)el.append(h("b",{},j.name+": "),j.message);else if(j&&j.error)el.append(h("span",{class:"error"},"Stopped: "+j.error+". Restart to resume."));else if(msg)el.append(h("span",{class:bad?"error":""},msg))}
+async function api(path,body){const r=await fetch(path,{method:"POST",headers:{"content-type":"application/json","x-chukta":"1"},body:JSON.stringify(body||{})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Request failed");return d}
+function who(){return $("by").value.trim()}
+async function act(path,body,done){try{say("");await api(path,{...body,by:who()});if(done)say(done);lastKey="";await refresh()}catch(e){say(e.message,true);if(/reviewer/i.test(e.message))$("by").focus()}}
+function stats(){const c=S.counts,items=[["To review",c.BLOCKED+c.HELD],["Ready to sign",c.READY],["Net ready",S.ready_net],["Paid once",S.paid_net],["Cost so far",S.cost.credits+" cr · $"+S.cost.usd]];$("stats").replaceChildren(...items.map(([a,b])=>h("div",{class:"stat"},h("span",{},a),h("b",{},String(b)))))}
+function queue(){const kids=[];for(const[name,states]of GROUPS){const rows=S.invoices.filter(i=>states.includes(i.state));if(!rows.length)continue;kids.push(h("div",{class:"group"},name+" ("+rows.length+")"));for(const i of rows)kids.push(h("button",{class:"row","aria-current":sel===i.id?"true":"false",onclick:()=>pick(i.id)},tag(i.state),h("span",{},h("span",{class:"vendor"},i.vendor),h("span",{class:"sub"},i.reason||(i.due?"MSME: pay by "+i.due:i.number+" · "+(i.date||"no date")))),h("span",{class:"money"},i.net||i.gross,h("small",{},i.number))))}
+$("queue").replaceChildren(...(kids.length?kids:[h("div",{class:"empty"},"No invoices yet. Run this week's invoices to start.")]))}
+async function pick(id){sel=id;queue();await detail()}
+function src(f){const s=f.source;const when=" · retrieved "+f.retrieved_at;return s.startsWith("https://")?h("span",{class:"src"},h("a",{href:s,target:"_blank",rel:"noopener noreferrer"},s),when):h("span",{class:"src"},s+when)}
+async function detail(){if(!sel)return;const r=await fetch("/api/invoice/"+sel);if(!r.ok)return;const d=await r.json();const key=JSON.stringify([d.state,d.findings,d.investigation&&d.investigation.at,d.order,d.payment_ref]);if(key===lastKey)return;lastKey=key;
+const n=d.investigation;const out=[h("div",{class:"head"},h("div",{},h("h2",{},d.vendor),h("span",{class:"sub"},(d.number||"No number")+" · "+(d.date||"no date")+" · "+(d.po||"no PO"))),tag(d.state))];
+if(n)out.push(h("div",{class:"call "+(d.state==="BLOCKED"?"block":"hold")},h("strong",{},"Recommended: "+n.action_text),h("span",{},n.explanation),n.callback&&h("p",{style:"margin:7px 0 0"},n.callback),h("div",{class:"who"},(n.author==="agent"?"Investigator agent, citations and numbers checked by code":"Rule-based explanation")+" · "+n.citations.length+" records cited")));
+else if(d.state==="READY")out.push(h("div",{class:"call"},h("strong",{},"Clean. Included in the next sign-off."),h("span",{},"Every record agrees with this invoice.")));
+if(d.state==="PAID")out.push(h("div",{class:"call"},h("strong",{},"Paid once"),h("span",{},"Provider reference "+d.payment_ref)));
+const money=d.order||{gross_paise:d.gross,tds_paise:d.tds};out.push(h("div",{class:"facts"},fact("Gross",money.gross_paise),fact("Taxable",d.taxable),fact("GST",d.tax),fact(d.order?"TDS":"TDS draft",money.tds_paise),d.order&&fact("GST retained",d.order.retained_gst_paise),d.order&&fact("Net paid",d.order.net_paise),d.due&&fact("MSME pay by",d.due),fact("GSTIN",d.gstin||"Unclear")));
+out.push(actions(d));out.push(h("h3",{},"Evidence"));for(const f of d.findings)out.push(h("div",{class:"check"},tag(f.status),h("div",{},h("p",{},h("b",{},(CHECK[f.check_name]||f.check_name)+". "),f.detail),src(f))));
+if(d.reader_notes.length)out.push(h("details",{},h("summary",{},"How it was read"),h("ul",{class:"log"},d.reader_notes.map(x=>h("li",{},x)))));
+out.push(h("details",{},h("summary",{},"Audit trail"),h("ul",{class:"log"},d.events.map(e=>h("li",{},e.at.replace("T"," ").replace("Z"," UTC")+" · "+e.actor+" · "+e.event+" · "+e.detail)))));out.push(h("details",{},h("summary",{},"Original document, accounts masked"),h("pre",{},d.raw)));$("detail").replaceChildren(...out.filter(Boolean))}
+function fact(a,b){return h("div",{},h("span",{},a),h("b",{},b||"—"))}
+function actions(d){if(!["READY","HELD","BLOCKED"].includes(d.state))return null;const note=h("textarea",{id:"note",rows:2,placeholder:d.state==="HELD"?"What did you check?":"Reason"}),retain=h("input",{type:"checkbox",id:"retain"}),tds=h("input",{id:"tds",inputmode:"decimal",placeholder:"TDS in rupees"});const btns=[];
+if(d.state==="HELD"&&d.can_approve)btns.push(h("button",{class:"btn primary",onclick:()=>act("/api/approve",{id:d.id,note:note.value,retain_gst:retain.checked,tds_rupees:d.needs_tds?tds.value:""},"Signed. It is waiting for payment release.")},"Approve with note"));if(d.can_alias)btns.push(h("button",{class:"btn",onclick:()=>act("/api/alias",{id:d.id},"Name confirmed and rechecked.")},"Confirm new name"));btns.push(h("button",{class:"btn",onclick:()=>act("/api/recheck",{id:d.id},"Rechecked.")},"Recheck"));btns.push(h("button",{class:"btn danger",onclick:()=>act("/api/reject",{id:d.id,note:note.value},"Rejected.")},"Reject"));
+return h("div",{},h("h3",{},"Your decision"),h("div",{class:"field"},h("label",{class:"label",for:"note"},"Note for the audit trail"),note),d.needs_tds&&h("div",{class:"field"},h("label",{class:"label",for:"tds"},"TDS to deduct"),tds),d.can_retain_gst&&h("label",{class:"tick"},retain,"Retain GST ("+d.tax+") until the supplier files"),h("div",{class:"actions"},btns))}
+function sign(){const c=S.counts,busy=S.job.running;$("signSummary").replaceChildren(h("b",{},c.READY+" ready"),", net "+S.ready_net+". ",h("b",{},c.APPROVED+" signed"),". "+(c.BLOCKED+c.HELD)+" need a decision.");$("signoff").disabled=busy||!c.READY;$("signoff").textContent=c.READY?"Sign off "+c.READY+" invoices":"Sign off";$("pay").disabled=busy||!c.APPROVED;$("pay").textContent=c.APPROVED?"Release "+c.APPROVED+" payments":"Release payments";$("runSample").disabled=busy;
+const ok=!S.audit_problems.length;$("exports").replaceChildren(h("span",{class:ok?"":"error"},ok?"Audit replay: every payment matches its sign-off.":"Audit problem: "+S.audit_problems[0]),h("a",{href:"/export/bank.csv"},"Bank file"),h("a",{href:"/export/tally.csv"},"Tally vouchers"),h("a",{href:"/export/audit.json"},"Audit file"),h("span",{},S.cost.calls+" calls in the ledger, "+S.cost.per_invoice_credits+" credits per invoice"))}
+async function refresh(){try{const r=await fetch("/api/state");S=await r.json();$("client").textContent=S.client;$("provider").textContent=S.provider;stats();queue();sign();paintStatus();if(sel&&document.activeElement?.id!=="note"&&document.activeElement?.id!=="tds")await detail()}catch{say("Chukta is not responding. Restart it and the work resumes.",true)}}
+$("runSample").onclick=async()=>{try{say("");await api("/api/run",{sample:true});refresh()}catch(e){say(e.message,true)}};$("runPaste").onclick=async()=>{try{say("");await api("/api/run",{text:$("pasteText").value});$("pasteText").value="";refresh()}catch(e){say(e.message,true)}};$("pasteToggle").onclick=e=>{const b=$("pasteBox");b.hidden=!b.hidden;e.target.setAttribute("aria-expanded",String(!b.hidden))};
+$("signoff").onclick=()=>act("/api/signoff",{},"Signed. Release payments when you are ready.");$("pay").onclick=()=>act("/api/pay",{});
+try{$("by").value=localStorage.getItem("chukta-reviewer")||""}catch{}$("by").addEventListener("input",()=>{try{localStorage.setItem("chukta-reviewer",$("by").value)}catch{}});refresh();setInterval(refresh,1500);
+</script>
+</body>
+</html>

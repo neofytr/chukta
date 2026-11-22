@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS vendors(client_id TEXT NOT NULL, gstin TEXT NOT NULL, name TEXT NOT NULL, domain TEXT NOT NULL,
     account TEXT NOT NULL, ifsc TEXT NOT NULL, emails TEXT NOT NULL DEFAULT '[]', aliases TEXT NOT NULL DEFAULT '[]',
     onboarded_at TEXT, msme TEXT, agreement_days INTEGER, tds_class TEXT, payee_type TEXT NOT NULL DEFAULT 'other',
-    gst_filing TEXT NOT NULL DEFAULT 'monthly', PRIMARY KEY(client_id, gstin));
+    gst_filing TEXT NOT NULL DEFAULT 'monthly', opening_fy TEXT, opening_taxable_paise INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(client_id, gstin));
 CREATE TABLE IF NOT EXISTS pos(client_id TEXT NOT NULL, po TEXT NOT NULL, gstin TEXT NOT NULL, amount_paise INTEGER NOT NULL,
     PRIMARY KEY(client_id, po));
 CREATE TABLE IF NOT EXISTS invoices(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, raw TEXT NOT NULL, raw_hash TEXT NOT NULL,
@@ -44,6 +45,10 @@ CREATE TABLE IF NOT EXISTS gstr2b(client_id TEXT NOT NULL, period TEXT NOT NULL,
     invoice_date TEXT NOT NULL, value_paise INTEGER NOT NULL, PRIMARY KEY(client_id, period, gstin, number_key));
 CREATE TABLE IF NOT EXISTS gstr2b_imports(client_id TEXT NOT NULL, period TEXT NOT NULL, imported_at TEXT NOT NULL,
     PRIMARY KEY(client_id, period));
+CREATE TABLE IF NOT EXISTS investigations(invoice_id INTEGER PRIMARY KEY, evidence_hash TEXT NOT NULL, explanation TEXT NOT NULL,
+    action TEXT NOT NULL, action_text TEXT NOT NULL, citations TEXT NOT NULL, callback TEXT, author TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pay_runs(id INTEGER PRIMARY KEY, started_by TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 REQUIRED = ("invoice_no", "invoice_date", "amount_paise", "gstin")
 # A person cannot approve past these. The document must be corrected or rejected.
@@ -68,11 +73,17 @@ class PaymentUnavailable(Exception):
     """The provider gave no clear answer. The invoice stays APPROVED and the next run asks again."""
 
 
+class PaymentRejected(Exception):
+    """The provider clearly refused and created nothing. A person must decide what happens next."""
+
+
 def connect(path):
     db = sqlite3.connect(path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    with db:  # Scopes provider references to this set of books, so a fresh demo database cannot collide with an old one.
+        db.execute("INSERT OR IGNORE INTO meta VALUES('books_id', ?)", (uuid.uuid4().hex[:12],))
     return db
 
 
@@ -90,11 +101,12 @@ def add_client(db, client_id, name):
 
 
 def add_vendor(db, client_id, gstin, name, domain, account, ifsc, emails=(), aliases=(), onboarded_at=None, msme=None,
-               agreement_days=None, tds_class=None, payee_type="other", gst_filing="monthly"):
+               agreement_days=None, tds_class=None, payee_type="other", gst_filing="monthly", opening_fy=None, opening_taxable_paise=0):
     with db:
-        db.execute("INSERT OR REPLACE INTO vendors VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT OR REPLACE INTO vendors VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (client_id, gstin, name, domain.lower(), account, ifsc, json.dumps([e.lower() for e in emails]),
-                    json.dumps(list(aliases)), onboarded_at, msme, agreement_days, tds_class, payee_type, gst_filing))
+                    json.dumps(list(aliases)), onboarded_at, msme, agreement_days, tds_class, payee_type, gst_filing,
+                    opening_fy, opening_taxable_paise))
 
 
 def add_po(db, client_id, po, gstin, amount_paise):
@@ -402,6 +414,8 @@ def compute_tds(db, vendor, inv):
     prior = db.execute("SELECT COALESCE(SUM(taxable_paise), 0) FROM invoices WHERE client_id=? AND gstin=? AND fy=? AND id<? AND state IN "
                        "('READY','HELD','APPROVED','PAID') AND id NOT IN (SELECT invoice_id FROM findings WHERE check_name='duplicate' "
                        "AND status='fail')", (inv["client_id"], inv["gstin"], inv["fy"], inv["id"])).fetchone()[0]
+    if vendor["opening_fy"] == inv["fy"]:  # Paid this year before Chukta started. Thresholds count the whole year.
+        prior += vendor["opening_taxable_paise"]
     limit = TDS_THRESHOLD_PAISE[kind]
     if kind == "contractor":
         basis_points, entry = (100 if vendor["payee_type"] == "individual" else 200), "6(i)"
@@ -645,6 +659,28 @@ def _event(db, invoice_id, event, actor, detail):
     db.execute("INSERT INTO events(invoice_id, event, actor, detail, at) VALUES(?,?,?,?,?)", (invoice_id, event, actor, detail, now()))
 
 
+def evidence_hash(db, invoice_id):
+    rows = [tuple(r) for r in db.execute("SELECT check_name, status, detail, source, retrieved_at FROM findings "
+                                         "WHERE invoice_id=? ORDER BY check_name", (invoice_id,))]
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
+
+
+def add_alias(db, src, invoice_id, by):
+    """A person confirms that the company record's name is this vendor, then the invoice is rechecked."""
+    inv = db.execute("SELECT client_id, gstin FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+    vendor = inv and db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
+    if not vendor or not by.strip():
+        raise ValueError("alias needs a known vendor and a named person")
+    match = src.identify(vendor["domain"])["match"]
+    if not match:
+        raise ValueError("no company record to confirm")
+    aliases = sorted({*json.loads(vendor["aliases"]), match["name"]})
+    with db:
+        db.execute("UPDATE vendors SET aliases=? WHERE client_id=? AND gstin=?", (json.dumps(aliases), inv["client_id"], inv["gstin"]))
+        _event(db, invoice_id, "alias_confirmed", by, f"{vendor['name']} is also {match['name']}")
+    return recheck(db, src, invoice_id, by)
+
+
 def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=False):
     """A named person signs. The exact payee and amount are frozen here, and payment uses only this record."""
     if not by.strip():
@@ -672,9 +708,7 @@ def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=Fal
                                     (inv["client_id"], inv["po"])).fetchone()[0]
                 if signed + inv["amount_paise"] > po["amount_paise"]:
                     raise ValueError(f"invoice {invoice_id} would overspend {inv['po']}")
-        rows = [tuple(r) for r in db.execute("SELECT check_name, status, detail, source, retrieved_at FROM findings "
-                                             "WHERE invoice_id=? ORDER BY check_name", (invoice_id,))]
-        evidence = hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
+        evidence = evidence_hash(db, invoice_id)
         tds = compute_tds(db, vendor, inv)[0]
         if tds_override_paise is not None:
             if tds_override_paise < 0 or not note.strip():
@@ -690,8 +724,9 @@ def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=Fal
         net = inv["amount_paise"] - tds - retained
         if net <= 0:
             raise ValueError(f"invoice {invoice_id}: net payable must be above zero")
+        books = db.execute("SELECT value FROM meta WHERE key='books_id'").fetchone()[0]
         db.execute("INSERT OR REPLACE INTO payment_orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (invoice_id, inv["client_id"], f"chukta:{inv['fingerprint']}", vendor["gstin"], vendor["name"], vendor["account"],
+                   (invoice_id, inv["client_id"], f"chukta:{books}:{inv['fingerprint']}", vendor["gstin"], vendor["name"], vendor["account"],
                     vendor["ifsc"], inv["amount_paise"], tds, retained, net, evidence, by, now()))
         db.execute("UPDATE invoices SET state='APPROVED' WHERE id=?", (invoice_id,))
         _event(db, invoice_id, "approved", by, f"{note or 'clean invoice'} | gross {_rupees(inv['amount_paise'])}, TDS {_rupees(tds)}, "
@@ -765,6 +800,15 @@ def pay_approved(db, bank):
             except PaymentUnavailable as e:
                 with db:
                     _event(db, o["invoice_id"], "payment_retry_needed", "chukta", str(e))
+                continue
+            except PaymentRejected as e:
+                with db:
+                    db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)",
+                               (o["invoice_id"], "payment", "fail", "hold", f"The payment provider refused this payment: {e}.",
+                                "provider response", today()))
+                    db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (o["invoice_id"],))
+                    db.execute("UPDATE invoices SET state='HELD' WHERE id=? AND state='APPROVED'", (o["invoice_id"],))
+                    _event(db, o["invoice_id"], "payment_rejected", "chukta", str(e))
                 continue
             except PaymentConflict:
                 with db:

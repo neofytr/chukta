@@ -362,11 +362,16 @@ class FakeRazorpay:
     """Behaves as the live test API did: a repeated reference_id is a 400, and lookup by reference works."""
 
     def __init__(self):
-        self.links, self.down = [], False
+        self.links, self.down, self.busy = [], False, 0
 
     def __call__(self, method, url, headers, body, timeout=20):
         if self.down:
             raise TimeoutError
+        if self.busy:
+            self.busy -= 1
+            return 429, {}, b'{"error": {"description": "Too many requests"}}'
+        if method == "POST" and json.loads(body)["amount"] > 1000000:
+            return 400, {}, b'{"error": {"description": "amount exceeds maximum amount allowed."}}'
         if method == "GET":
             ref = url.split("reference_id=")[1]
             return 200, {}, json.dumps({"payment_links": [l for l in self.links if l["reference_id"] == ref]}).encode()
@@ -381,7 +386,7 @@ class FakeRazorpay:
 assert refuses(RazorpayBank, connect(":memory:"), "rzp_live_abc", "s"), "live keys are refused"
 db = connect(":memory:")
 rzp = FakeRazorpay()
-bank = RazorpayBank(db, "rzp_test_abc", "s", rzp)
+bank = RazorpayBank(db, "rzp_test_abc", "s", rzp, sleep=lambda s: None)
 ref = bank.pay("key-1", ACCOUNT, IFSC, 5000)
 db.execute("DELETE FROM provider_payments")
 db.commit()
@@ -403,11 +408,31 @@ process(db, src)
 approve(db, i, "tester")
 rzp = FakeRazorpay()
 rzp.down = True
-pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", rzp))
+quiet = {"sleep": lambda s: None}
+pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", rzp, **quiet))
 assert state(db, i) == "APPROVED", "stays approved through a provider outage"
-rzp.down = False
-pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", rzp))
-assert state(db, i) == "PAID" and len(rzp.links) == 1
+rzp.down, rzp.busy = False, 2
+db.execute("UPDATE payment_orders SET net_paise=900000")
+db.commit()
+pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", rzp, **quiet))
+assert state(db, i) == "PAID" and len(rzp.links) == 1, "a rate limit is retried"
+db, net, src = desk()
+i = ingest(db, "c1", invoice())
+process(db, src)
+approve(db, i, "tester")
+pay_approved(db, RazorpayBank(db, "rzp_test_abc", "s", FakeRazorpay(), **quiet))
+assert state(db, i) == "HELD" and "maximum" in db.execute("SELECT detail FROM findings WHERE check_name='payment'").fetchone()[0], "a provider refusal goes to a person"
+assert db.execute("SELECT COUNT(*) FROM payment_orders").fetchone()[0] == 0
+
+# TDS thresholds count what was paid this year before Chukta started
+db, i, s = run(invoice(taxable="20,000.00", tax="3,600.00", total="23,600.00"), tds_class="contractor", opening_fy="2026-27",
+               opening_taxable_paise=15000000)
+approve(db, i, "tester")
+assert s == "READY" and db.execute("SELECT tds_paise FROM payment_orders").fetchone()[0] == 40000
+db, i, s = run(invoice(taxable="20,000.00", tax="3,600.00", total="23,600.00"), tds_class="contractor", opening_fy="2025-26",
+               opening_taxable_paise=15000000)
+approve(db, i, "tester")
+assert db.execute("SELECT tds_paise FROM payment_orders").fetchone()[0] == 0, "last year's total does not count"
 
 # One invalid domain does not cost the other vendors their company check
 net = Net()
@@ -416,6 +441,67 @@ db, _, src = desk(net=net)
 got = src.identify_many(["bad-domain.in", "acmetools.in", "fictional.test"])
 assert got["bad-domain.in"]["match"] is None and got["fictional.test"]["match"] is None and got["acmetools.in"]["match"]
 assert not src.down, "an invalid domain is not an outage"
+
+# The investigator explains exceptions, cannot change state, and its claims are checked
+from chukta.exports import audit_file, bank_file, tally_vouchers, verify_audit  # noqa: E402
+from chukta.investigator import ModelDown, investigate  # noqa: E402
+
+
+def scripted(*replies):
+    queue = list(replies)
+
+    def chat(messages, use_tools):
+        return queue.pop(0), {"prompt_tokens": 10, "completion_tokens": 5}
+    return chat
+
+
+def tool_call(name):
+    return {"content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": name, "arguments": "{}"}}]}
+
+
+def answer(text, action, cited):
+    return {"content": json.dumps({"explanation": text, "action": action, "citations": cited})}
+
+
+fraud = invoice(sender="billing@acmet00ls.in", account="99999999999999")
+db, i, s = run(fraud)
+good = investigate(db, i, "t", scripted(tool_call("get_vendor"), answer("The invoice names a different bank account than the vendor master.", "call_vendor",
+                                                                         ["finding:bank", f"vendor:{ACME}"])))
+assert good["author"] == "agent" and good["action"] == "call_vendor" and "known" not in good["explanation"] and good["callback"]
+assert state(db, i) == "BLOCKED" and payments(db) == 0, "the investigator changes nothing"
+db, i, s = run(fraud)
+assert investigate(db, i, "t", scripted(answer("The vendor account should be paid ₹9,99,999 today as confirmed.", "call_vendor", ["finding:bank"])))["author"] == "rules", "invented number"
+db, i, s = run(fraud)
+assert investigate(db, i, "t", scripted(answer("This looks fine and the record supports it fully.", "call_vendor", ["finding:madeup"])))["author"] == "rules", "invented citation"
+db, i, s = run(fraud)
+assert investigate(db, i, "t", scripted(answer("The bank account differs from the vendor master.", "retain_gst_and_pay", ["finding:bank"])))["action"] == "call_vendor", "action outside policy"
+
+
+def model_down(messages, use_tools):
+    raise ModelDown()
+
+
+db, i, s = run(fraud)
+fallback = investigate(db, i, "t", model_down)
+assert fallback["author"] == "rules" and "master" in fallback["explanation"]
+
+# The audit replay catches tampering, and exports are safe to open
+db, net, src = desk()
+i = ingest(db, "c1", invoice())
+process(db, src)
+approve(db, i, "tester")
+pay_approved(db, SandboxBank(db))
+assert verify_audit(db, "c1") == [] and audit_file(db, "c1")["replay_problems"] == []
+assert "1180.00" not in bank_file(db, "c1") and "118000.00" in bank_file(db, "c1") and "18000.00" in tally_vouchers(db, "c1")
+db.execute("UPDATE provider_payments SET amount_paise=1")
+db.commit()
+assert any("differs" in p for p in verify_audit(db, "c1")), "tampered payment"
+db, net, src = desk()
+add_vendor(db, "c1", ACME, "=HYPERLINK(1)", "acmetools.in", ACCOUNT, IFSC, onboarded_at="2026-01-01", tds_class="goods", aliases=["Acme Tools"])
+i = ingest(db, "c1", invoice())
+process(db, src)
+approve(db, i, "tester")
+assert "'=HYPERLINK" in bank_file(db, "c1"), "formula is neutralised"
 
 # The model reader: nothing it says is accepted unless the invoice text supports it
 MESSY = (f"fwd urgent. from - Ravi <ravi@acmetools.in>. GST no {ACME}. bill no KF/26-27/0091 dt 7th oct 2026 agnst po 1001. "
