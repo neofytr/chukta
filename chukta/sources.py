@@ -224,5 +224,30 @@ class Sources:
                 self._store(f"identify:{domain}", out[domain])
         return out
 
+    def identify_names(self, names):
+        """Every company trading under each name. A name alone is evidence of ambiguity, never of identity."""
+        out, missing = {}, []
+        for name in dict.fromkeys(names):
+            hit = self._cached(f"names:{name.lower()}")
+            if hit:
+                out[name] = hit
+            else:
+                missing.append(name)
+        for i in range(0, len(missing), 25):
+            chunk = missing[i:i + 25]
+            rows = self._request("crustdata", "/company/identify", API + "/company/identify", {"names": chunk}, estimate=0.2 * len(chunk))
+            try:
+                by_name = {r["matched_on"].lower(): r["matches"] for r in rows}
+                for name in chunk:
+                    matches = [{"name": m["company_data"]["basic_info"]["name"], "domain": m["company_data"]["basic_info"].get("primary_domain"),
+                                "confidence": _number(m.get("confidence_score"))} for m in by_name[name.lower()]]
+                    out[name] = {"matches": [m for m in matches if isinstance(m["name"], str)], "retrieved_at": time.strftime("%Y-%m-%d")}
+            except (KeyError, TypeError, AttributeError) as e:
+                self.down["crustdata"] = "Crustdata returned an unusable record"
+                raise SourceDown(self.down["crustdata"]) from e
+            for name in chunk:
+                self._store(f"names:{name.lower()}", out[name])
+        return out
+
     def identify(self, domain):
         return self.identify_many([domain])[domain.lower()]

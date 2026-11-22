@@ -19,13 +19,13 @@ PACE_S = 1.5  # Razorpay returned 429 on a burst of about ten calls. Tune here i
 
 
 class RazorpayBank:
-    def __init__(self, db, key=None, secret=None, transport=http_call, sleep=time.sleep):
+    def __init__(self, db, key=None, secret=None, transport=http_call, sleep=time.sleep, run_id="payments"):
         if key is None:
             env = load_env()
             key, secret = env.get("RAZORPAY_KEY_ID", ""), env.get("RAZORPAY_KEY_SECRET", "")
         if not key.startswith("rzp_test_") or not secret:
             raise ValueError("Chukta runs only on Razorpay test keys")
-        self.db, self.transport, self.sleep = db, transport, sleep
+        self.db, self.transport, self.sleep, self.run_id = db, transport, sleep, run_id
         self.auth = "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
 
     def _call(self, method, path, payload=None):
@@ -40,6 +40,9 @@ class RazorpayBank:
                 raise PaymentUnavailable(f"Razorpay: {type(e).__name__}") from e
             except ValueError as e:
                 raise PaymentUnavailable("Razorpay returned an unreadable reply") from e
+            with self.db:
+                self.db.execute("INSERT INTO ledger(run_id, source, request, credits, outcome, at, usd) VALUES(?,?,?,?,?,?,?)",
+                                (self.run_id, "razorpay_test", f"{method} {path.split('?')[0]}", 0, str(status), now(), 0))
             if status != 429:
                 return status, reply
             if wait:  # A 429 means nothing was created, so repeating the same reference is safe.

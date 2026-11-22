@@ -3,7 +3,7 @@ import csv
 import io
 import json
 
-from .desk import evidence_hash, now
+from .desk import _mask, _rupees, evidence_hash, now
 
 
 def _safe(value):
@@ -67,6 +67,19 @@ def verify_audit(db, client_id):
     return problems
 
 
+def replay_lines(db, client_id):
+    """One row per signed payment, so a reviewer can watch the books replay."""
+    problems = verify_audit(db, client_id)
+    rows = []
+    for o in db.execute("SELECT o.*, i.state, i.fields, i.payment_ref FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE o.client_id=? "
+                        "ORDER BY o.invoice_id", (client_id,)).fetchall():
+        own = [p for p in problems if p.startswith(f"Invoice {o['invoice_id']}:")]
+        rows.append({"id": o["invoice_id"], "number": json.loads(o["fields"]).get("invoice_no"), "payee": o["payee_name"], "gross": _rupees(o["gross_paise"]),
+                     "tds": _rupees(o["tds_paise"]), "retained": _rupees(o["retained_gst_paise"]), "net": _rupees(o["net_paise"]), "signed_by": o["approved_by"],
+                     "reference": o["payment_ref"], "state": o["state"], "ok": not own, "problems": own})
+    return {"lines": rows, "problems": problems, "ok": not problems}
+
+
 def audit_file(db, client_id):
     invoices = []
     for inv in db.execute("SELECT * FROM invoices WHERE client_id=? ORDER BY id", (client_id,)).fetchall():
@@ -75,10 +88,14 @@ def audit_file(db, client_id):
         note = db.execute("SELECT * FROM investigations WHERE invoice_id=?", (i,)).fetchone()
         fields = json.loads(inv["fields"])
         fields.pop("usage", None)
+        fields["accounts"] = [_mask(a) for a in fields.get("accounts", [])]  # Only the data an audit needs.
+        fields["sender_emails"] = sorted({e.split("@")[-1] for e in fields.get("sender_emails", [])})
         invoices.append({
             "invoice_id": i, "state": inv["state"], "fields": fields, "payment_reference": inv["payment_ref"],
             "findings": [dict(r) for r in db.execute("SELECT check_name, status, severity, detail, source, retrieved_at FROM findings WHERE invoice_id=?", (i,))],
             "events": [dict(r) for r in db.execute("SELECT event, actor, detail, at FROM events WHERE invoice_id=? ORDER BY id", (i,))],
-            "signed_order": dict(order) if order else None, "investigation": dict(note) if note else None})
+            "signed_order": {**dict(order), "account": _mask(order["account"])} if order else None, "investigation": dict(note) if note else None})
     ledger = [dict(r) for r in db.execute("SELECT run_id, source, request, credits, usd, outcome, at FROM ledger ORDER BY id")]
-    return {"client_id": client_id, "exported_at": now(), "replay_problems": verify_audit(db, client_id), "invoices": invoices, "ledger": ledger}
+    return {"client_id": client_id, "exported_at": now(), "replay_problems": verify_audit(db, client_id), "invoices": invoices, "ledger": ledger,
+            "bank_lines": [dict(r) for r in db.execute("SELECT txn_date, narration, amount_paise, payee, account, status, reason, source, retrieved_at, resolved_by "
+                                                       "FROM bank_lines WHERE client_id=? ORDER BY id", (client_id,))]}

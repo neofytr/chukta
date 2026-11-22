@@ -4,27 +4,32 @@ python3 app.py           start on http://127.0.0.1:8765 and resume any interrupt
 python3 app.py --reset   delete the local demo books first
 """
 import json
+import mimetypes
 import os
 import pathlib
 import re
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from chukta.demo import BATCH, CLIENT, CLIENT_NAME, seed
-from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, compute_tds, connect, ingest, now, pay_approved, process,
+from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
+from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, compute_tds, connect, ingest, now, parse, pay_approved, process,
                          recheck, reject)
-from chukta.exports import audit_file, bank_file, tally_vouchers, verify_audit
-from chukta.investigator import investigate
+from chukta.exports import audit_file, bank_file, replay_lines, tally_vouchers, verify_audit
+from chukta.investigator import ModelDown, investigate, model_chat
 from chukta.razorpay import RazorpayBank
 from chukta.reader import logged_reader
+from chukta.records import mask_text, record
+from chukta.runs import close_finished_runs, create_run, interrupted_runs, latest_run, model_spend, set_stage
 from chukta.sources import Sources
+from chukta.statement import dismiss_line, import_statement, post_lines, resolve_line, statement_payload
 
 ROOT = pathlib.Path(__file__).parent
+STATIC = ROOT / "static"
 DB = str(ROOT / "chukta.db")
 PORT = int(os.environ.get("CHUKTA_PORT", 8765))
-CREDIT_LIMIT, TIME_LIMIT_S = 10.0, 900  # Ceiling for each run.
 PAY_DELAY_S = float(os.environ.get("CHUKTA_PAY_DELAY", 0))  # Set to 3 to make a kill during payment easy to show.
 MAX_BODY = 1_000_000
 JOB = {"running": False, "name": "", "message": "", "error": ""}
@@ -32,9 +37,9 @@ JOB_LOCK = threading.Lock()
 ORDER = {"BLOCKED": 0, "HELD": 1, "NEW": 2, "READY": 3, "APPROVED": 4, "PAID": 5, "REJECTED": 6}
 
 
-def bank_for(db):
+def bank_for(db, run_id="payments"):
     try:
-        return RazorpayBank(db)
+        return RazorpayBank(db, run_id=run_id)
     except (ValueError, OSError):
         return SandboxBank(db)
 
@@ -63,96 +68,144 @@ def start_job(name, target, *args):
             target(*args)
             JOB["message"] = "Done"
         except Exception as e:  # The app must stay up and show the failure. Work resumes on the next run.
-            JOB.update(error=f"{type(e).__name__}: {e}", message="Stopped")
+            JOB.update(error=f"{e}", message="Stopped")
         finally:
             JOB["running"] = False
     threading.Thread(target=wrapped, daemon=True).start()
     return True
 
 
-def run_batch(texts):
+def _no_model(messages, use_tools):
+    raise ModelDown()
+
+
+def run_batch(run_id):
+    """Each stage is safe to repeat, so a restart simply calls this again."""
     db = connect(DB)
-    run_id = f"run-{int(time.time())}"
-    read = logged_reader(db, run_id)
-    for n, text in enumerate(texts, 1):
-        JOB["message"] = f"Reading invoice {n} of {len(texts)}"
-        ingest(db, CLIENT, text, read)
-    JOB["message"] = "Checking against records"
-    process(db, Sources(db, run_id, credit_limit=CREDIT_LIMIT, time_limit_s=TIME_LIMIT_S))
+    run = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    deadline = time.monotonic() + run["time_limit_s"]
+    within = lambda: time.monotonic() < deadline and model_spend(db, run_id) < run["model_usd_limit"]
+    read_with_model = logged_reader(db, run_id)
+    read = lambda text: read_with_model(text) if within() else parse(text) | {"reader_notes": ["Run ceiling reached. Used the rule-based parser only."], "usage": None}
+    pending = db.execute("SELECT n, text FROM run_inputs WHERE run_id=? AND done=0 ORDER BY n", (run_id,)).fetchall()
+    total = db.execute("SELECT COUNT(*) FROM run_inputs WHERE run_id=?", (run_id,)).fetchone()[0]
+    set_stage(db, run_id, "reading")
+    for row in pending:
+        JOB["message"] = f"Reading invoice {row['n'] + 1} of {total}"
+        ingest(db, CLIENT, row["text"], read)
+        with db:
+            db.execute("UPDATE run_inputs SET done=1 WHERE run_id=? AND n=?", (run_id, row["n"]))
+    set_stage(db, run_id, "checking")
+    JOB["message"] = "Checking each invoice against independent records"
+    process(db, Sources(db, run_id, credit_limit=run["credit_limit"], time_limit_s=run["time_limit_s"]))
+    set_stage(db, run_id, "investigating")
     todo = db.execute("SELECT id FROM invoices i WHERE state IN ('HELD','BLOCKED') AND NOT EXISTS "
                       "(SELECT 1 FROM investigations n WHERE n.invoice_id=i.id)").fetchall()
     for n, row in enumerate(todo, 1):
         JOB["message"] = f"Investigating exception {n} of {len(todo)}"
-        investigate(db, row[0], run_id)
+        investigate(db, row[0], run_id, model_chat if within() else _no_model)
+    set_stage(db, run_id, "review")
+    close_finished_runs(db)
     db.close()
 
 
-def run_pay(run_row):
+def run_pay(pay_row):
     db = connect(DB)
+    current = latest_run(db)
+    if current:
+        set_stage(db, current["id"], "paying")
     JOB["message"] = "Releasing signed payments"
-    pay_approved(db, SlowBank(bank_for(db)))
+    pay_approved(db, SlowBank(bank_for(db, current["id"] if current else "payments")))
     left = db.execute("SELECT COUNT(*) FROM invoices WHERE state='APPROVED'").fetchone()[0]
     if not left:
         with db:
             db.execute("UPDATE pay_runs SET finished_at=? WHERE finished_at IS NULL", (now(),))
+    if current:
+        set_stage(db, current["id"], "review")
+    close_finished_runs(db)
     db.close()
     if left:  # The run stays open, so a restart or another release finishes it.
         raise RuntimeError(f"{left} signed payments did not go through and are safe to retry")
 
 
-def resume():
-    """After a crash: finish unchecked invoices, then any payment run a person already released."""
+def run_statement(text):
     db = connect(DB)
-    seed(db)
-    new = db.execute("SELECT COUNT(*) FROM invoices WHERE state='NEW'").fetchone()[0]
-    missing = db.execute("SELECT COUNT(*) FROM invoices i WHERE state IN ('HELD','BLOCKED') AND NOT EXISTS "
-                         "(SELECT 1 FROM investigations n WHERE n.invoice_id=i.id)").fetchone()[0]
-    open_run = db.execute("SELECT id FROM pay_runs WHERE finished_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+    JOB["message"] = "Reading statement lines"
+    import_statement(db, CLIENT, text)
+    JOB["message"] = "Matching payees"
+    post_lines(db, Sources(db, f"statement-{int(time.time())}", credit_limit=5.0, time_limit_s=300), CLIENT)
+    db.close()
+
+
+def resume():
+    """After a crash: finish interrupted runs, then any payment run a person already released."""
+    db = connect(DB)
+    if not db.execute("SELECT 1 FROM clients WHERE id=?", (CLIENT,)).fetchone():
+        seed(db)  # Seeded once, so a person's vendor corrections survive a restart.
+    runs = interrupted_runs(db)
+    open_pay = db.execute("SELECT id FROM pay_runs WHERE finished_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+    unposted = db.execute("SELECT COUNT(*) FROM bank_lines WHERE status='NEW'").fetchone()[0]
     db.close()
 
     def work():
-        if new or missing:
-            run_batch([])
-        if open_run:
-            run_pay(open_run[0])
-    if new or missing or open_run:
+        for run_id in runs:
+            run_batch(run_id)
+        if open_pay:
+            run_pay(open_pay[0])
+        if unposted:
+            run_statement("")
+    if runs or open_pay or unposted:
         start_job("Resuming after restart", work)
         return True
     return False
 
 
-def mask_accounts(text):
-    return re.sub(r"\b\d(?:[ -]?\d){8,17}\b", lambda m: "****" + re.sub(r"\D", "", m.group(0))[-4:], text)
+def run_block(db):
+    r = latest_run(db)
+    if not r:
+        return None
+    total, done = db.execute("SELECT COUNT(*), COALESCE(SUM(done), 0) FROM run_inputs WHERE run_id=?", (r["id"],)).fetchone()
+    credits, usd, calls = db.execute("SELECT COALESCE(SUM(credits),0), COALESCE(SUM(usd),0), COUNT(*) FROM ledger WHERE run_id=?", (r["id"],)).fetchone()
+    return {"id": r["id"], "request": r["request"], "understood": json.loads(r["understood"]), "stage": r["stage"], "started_at": r["started_at"],
+            "finished_at": r["finished_at"], "inputs_total": total, "inputs_done": done, "credits": round(credits, 2), "usd": round(usd, 4), "calls": calls,
+            "credit_limit": r["credit_limit"], "model_usd_limit": r["model_usd_limit"], "time_limit_s": r["time_limit_s"]}
 
 
 def state_payload(db):
-    rows = db.execute("SELECT i.*, v.name vendor_name, o.net_paise order_net, n.action_text FROM invoices i "
+    rows = db.execute("SELECT i.*, v.name vendor_name, o.net_paise order_net, o.tds_paise order_tds, o.retained_gst_paise order_retained, n.action_text FROM invoices i "
                       "LEFT JOIN vendors v ON v.client_id=i.client_id AND v.gstin=i.gstin LEFT JOIN payment_orders o ON o.invoice_id=i.id "
                       "LEFT JOIN investigations n ON n.invoice_id=i.id WHERE i.client_id=?", (CLIENT,)).fetchall()
-    out, ready_net = [], 0
+    out, run_lines = [], []
+    totals = {"gross": 0, "tds": 0, "retained": 0, "net": 0}
     for r in rows:
         f = json.loads(r["fields"])
-        net = r["order_net"]
+        net, tds = r["order_net"], r["order_tds"]
         if net is None and r["amount_paise"] and r["vendor_name"] and r["state"] in ("READY", "HELD", "BLOCKED"):
             vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (r["client_id"], r["gstin"])).fetchone()
             tds = compute_tds(db, vendor, r)[0]
             net = r["amount_paise"] - tds if tds is not None else None
-        if r["state"] == "READY" and net:
-            ready_net += net
+        if r["state"] in ("READY", "APPROVED") and net:
+            run_lines.append({"id": r["id"], "vendor": r["vendor_name"], "number": f.get("invoice_no"), "net": _rupees(net), "tds": _rupees(tds or 0),
+                              "due": r["due_date"], "state": r["state"]})
+            totals["gross"] += r["amount_paise"]
+            totals["tds"] += tds or 0
+            totals["retained"] += r["order_retained"] or 0
+            totals["net"] += net
         reason = db.execute("SELECT detail FROM findings WHERE invoice_id=? AND status NOT IN ('pass','info') "
                             "ORDER BY severity='block' DESC LIMIT 1", (r["id"],)).fetchone()
         out.append({"id": r["id"], "number": f.get("invoice_no") or "No number", "vendor": r["vendor_name"] or "Unknown vendor", "date": r["invoice_date"],
                     "state": r["state"], "gross": _rupees(r["amount_paise"]) if r["amount_paise"] else "Unclear", "net": _rupees(net) if net else "",
                     "due": r["due_date"], "reason": reason[0] if reason else "", "action": r["action_text"] or ""})
     out.sort(key=lambda x: (ORDER.get(x["state"], 9), x["due"] or "9999", x["id"]))
+    run_lines.sort(key=lambda x: (x["due"] or "9999", x["id"]))
     counts = {s: sum(1 for x in out if x["state"] == s) for s in ORDER}
     credits, usd, calls = db.execute("SELECT COALESCE(SUM(credits),0), COALESCE(SUM(usd),0), COUNT(*) FROM ledger").fetchone()
-    paid = db.execute("SELECT COALESCE(SUM(net_paise),0) FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.state='PAID'").fetchone()[0]
+    issued = db.execute("SELECT COALESCE(SUM(net_paise),0) FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.state='PAID'").fetchone()[0]
     return {"client": CLIENT_NAME, "provider": "Razorpay test mode" if isinstance(bank_for(db), RazorpayBank) else "Local sandbox",
-            "invoices": out, "counts": counts, "ready_net": _rupees(ready_net), "paid_net": _rupees(paid), "job": dict(JOB),
-            "cost": {"credits": round(credits, 2), "usd": round(usd, 4), "calls": calls, "per_invoice_credits": round(credits / len(out), 2) if out else 0},
-            "audit_problems": verify_audit(db, CLIENT), "payable_now": counts["APPROVED"],
-            "open_pay_run": bool(db.execute("SELECT 1 FROM pay_runs WHERE finished_at IS NULL").fetchone())}
+            "sample_request": SAMPLE_REQUEST, "sample_count": len(BATCH), "invoices": out, "counts": counts, "issued": _rupees(issued),
+            "payment_run": {"lines": run_lines, "gross": _rupees(totals["gross"]), "tds": _rupees(totals["tds"]), "retained": _rupees(totals["retained"]), "net": _rupees(totals["net"])},
+            "job": dict(JOB), "run": run_block(db), "cost": {"credits": round(credits, 2), "usd": round(usd, 4), "calls": calls},
+            "audit_problems": verify_audit(db, CLIENT), "open_pay_run": bool(db.execute("SELECT 1 FROM pay_runs WHERE finished_at IS NULL").fetchone())}
 
 
 def invoice_payload(db, invoice_id):
@@ -168,18 +221,35 @@ def invoice_payload(db, invoice_id):
     note = db.execute("SELECT * FROM investigations WHERE invoice_id=?", (invoice_id,)).fetchone()
     order = db.execute("SELECT gross_paise, tds_paise, retained_gst_paise, net_paise, approved_by FROM payment_orders WHERE invoice_id=?", (invoice_id,)).fetchone()
     company = next((x for x in findings if x["check_name"] == "company"), None)
+    net = order["net_paise"] if order else (r["amount_paise"] - tds if r["amount_paise"] and tds is not None else None)
     return {"id": r["id"], "state": r["state"], "number": fields.get("invoice_no"), "date": r["invoice_date"], "po": r["po"],
-            "vendor": vendor["name"] if vendor else "Unknown vendor", "gstin": r["gstin"],
+            "vendor": vendor["name"] if vendor else "Unknown vendor", "gstin": r["gstin"], "net": _rupees(net) if net else "Unclear",
             "gross": _rupees(r["amount_paise"]) if r["amount_paise"] else "Unclear", "taxable": _rupees(r["taxable_paise"]) if r["taxable_paise"] else "Unclear",
             "tax": _rupees(r["tax_paise"]) if r["tax_paise"] else "Unclear", "tds": _rupees(tds) if tds is not None else "Needs a person",
             "due": r["due_date"], "findings": findings, "reader_notes": fields.get("reader_notes", []),
             "events": [dict(x) for x in db.execute("SELECT event, actor, detail, at FROM events WHERE invoice_id=? ORDER BY id", (invoice_id,))],
             "investigation": {**dict(note), "citations": json.loads(note["citations"])} if note else None,
             "order": {k: _rupees(order[k]) for k in ("gross_paise", "tds_paise", "retained_gst_paise", "net_paise")} | {"by": order["approved_by"]} if order else None,
-            "payment_ref": r["payment_ref"], "raw": mask_accounts(r["raw"]),
+            "payment_ref": r["payment_ref"], "raw": mask_text(r["raw"]),
             "can_approve": r["state"] in ("READY", "HELD") and not (failing & set(HARD_STOPS)), "needs_tds": tds is None and bool(vendor),
             "can_retain_gst": "gst" in failing and bool(r["tax_paise"]),
             "can_alias": bool(company and company["status"] == "unverified" and "resolves to" in company["detail"])}
+
+
+def ledger_payload(db):
+    by_source = [dict(r) for r in db.execute("SELECT source, COUNT(*) calls, ROUND(SUM(credits),3) credits, ROUND(SUM(usd),5) usd FROM ledger GROUP BY source ORDER BY calls DESC")]
+    calls = [dict(r) for r in db.execute("SELECT id, run_id, source, request, credits, usd, outcome, at FROM ledger ORDER BY id DESC LIMIT 150")]
+    invoices = db.execute("SELECT COUNT(*) FROM invoices").fetchone()[0]
+    credits, usd, total = db.execute("SELECT COALESCE(SUM(credits),0), COALESCE(SUM(usd),0), COUNT(*) FROM ledger").fetchone()
+    return {"by_source": by_source, "calls": calls, "total_calls": total, "credits": round(credits, 2), "usd": round(usd, 4), "invoices": invoices,
+            "per_invoice_credits": round(credits / invoices, 3) if invoices else 0, "per_invoice_usd": round(usd / invoices, 5) if invoices else 0, "run": run_block(db)}
+
+
+def font_css():
+    font = STATIC / "GoogleSansFlex.woff2"
+    if not font.exists():
+        return b""
+    return b'@font-face{font-family:"Google Sans Flex";src:url(/static/GoogleSansFlex.woff2) format("woff2");font-weight:100 1000;font-display:swap}'
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -189,14 +259,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def _send(self, code, body, kind="application/json", name=None):
+    def _send(self, code, body, kind="application/json", name=None, cache=False):
         data = body if isinstance(body, bytes) else (body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode())
         self.send_response(code)
         self.send_header("content-type", kind)
         self.send_header("content-length", str(len(data)))
         self.send_header("x-content-type-options", "nosniff")
-        self.send_header("cache-control", "no-store")
-        self.send_header("content-security-policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+        self.send_header("referrer-policy", "no-referrer")
+        self.send_header("cache-control", "max-age=60" if cache else "no-store")
+        self.send_header("content-security-policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; "
+                                                    "font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
         if name:
             self.send_header("content-disposition", f'attachment; filename="{name}"')
         self.end_headers()
@@ -208,11 +280,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._host_ok():
             return self._send(403, {"error": "bad host"})
-        path = self.path.split("?")[0]
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
         if path == "/":
             return self._send(200, (ROOT / "ui.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/favicon.ico":
             return self._send(204, b"")
+        if path == "/static/font.css":
+            return self._send(200, font_css(), "text/css; charset=utf-8")
+        if m := re.fullmatch(r"/static/([A-Za-z0-9_-]+\.(?:css|js|woff2|svg))", path):
+            file = STATIC / m.group(1)
+            if not file.is_file():
+                return self._send(404, {"error": "not found"})
+            kind = {"css": "text/css; charset=utf-8", "js": "text/javascript; charset=utf-8", "woff2": "font/woff2", "svg": "image/svg+xml"}.get(file.suffix[1:]) or mimetypes.guess_type(file.name)[0]
+            return self._send(200, file.read_bytes(), kind, cache=file.suffix == ".woff2")
         db = connect(DB)
         try:
             if path == "/api/state":
@@ -220,6 +301,19 @@ class Handler(BaseHTTPRequestHandler):
             if m := re.fullmatch(r"/api/invoice/(\d+)", path):
                 got = invoice_payload(db, int(m.group(1)))
                 return self._send(200, got) if got else self._send(404, {"error": "not found"})
+            if path == "/api/record":
+                q = urllib.parse.parse_qs(parsed.query)
+                try:
+                    got = record(db, int(q.get("invoice", ["0"])[0]), q.get("check", [""])[0])
+                except ValueError:
+                    got = None
+                return self._send(200, got) if got else self._send(404, {"error": "not found"})
+            if path == "/api/ledger":
+                return self._send(200, ledger_payload(db))
+            if path == "/api/statement":
+                return self._send(200, statement_payload(db, CLIENT) | {"sample": SAMPLE_STATEMENT})
+            if path == "/api/replay":
+                return self._send(200, replay_lines(db, CLIENT))
             if path == "/export/bank.csv":
                 return self._send(200, bank_file(db, CLIENT), "text/csv; charset=utf-8", "chukta-bank-file.csv")
             if path == "/export/tally.csv":
@@ -253,18 +347,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route(self, db, body):
         path = self.path
-        by = str(body.get("by") or "").strip()[:80]
         if path == "/api/run":
+            if JOB["running"]:
+                raise ValueError("Chukta is already working")
             texts = [t for _, t, _, _ in BATCH] if body.get("sample") else [t.strip() for t in str(body.get("text", "")).split("\n---\n") if t.strip()]
-            if not texts or len(texts) > 100 or any(len(t) > 30000 for t in texts):
-                raise ValueError("Add between 1 and 100 invoices, separated by a line with ---")
-            if not start_job("Running the request", run_batch, texts):
+            if len(texts) > 100 or any(len(t) > 30000 for t in texts):
+                raise ValueError("Add up to 100 invoices, separated by a line with ---")
+            run_id = create_run(db, CLIENT, str(body.get("request") or "")[:2000], texts)
+            start_job("Running the request", run_batch, run_id)
+            return {"ok": True, "run": run_id}
+        if path == "/api/statement":
+            text = SAMPLE_STATEMENT if body.get("sample") else str(body.get("text", ""))[:60000]
+            if not text.strip():
+                raise ValueError("Paste at least one statement line")
+            if not start_job("Posting the statement", run_statement, text):
                 raise ValueError("Chukta is already working")
             return {"ok": True}
+        by = str(body.get("by") or "").strip()[:80]
         if not by:
             raise ValueError("Enter the reviewer's name first")
         if JOB["running"]:
             raise ValueError("Chukta is working. Try again when it finishes.")
+        note = str(body.get("note") or "").strip()[:500]
+        if path in ("/api/line/resolve", "/api/line/dismiss"):
+            line_id = int(body.get("id", 0))
+            if path.endswith("resolve"):
+                resolve_line(db, line_id, by, str(body.get("payee") or ""), str(body.get("account") or ""), note)
+            else:
+                dismiss_line(db, line_id, by, note)
+            return {"ok": True}
         if path == "/api/signoff":
             ids = [r[0] for r in db.execute("SELECT id FROM invoices WHERE client_id=? AND state='READY'", (CLIENT,))]
             for i in ids:
@@ -284,8 +395,8 @@ class Handler(BaseHTTPRequestHandler):
         invoice_id = int(body.get("id", 0))
         if not db.execute("SELECT 1 FROM invoices WHERE id=? AND client_id=?", (invoice_id, CLIENT)).fetchone():
             raise ValueError("Unknown invoice")
-        note = str(body.get("note") or "").strip()[:500]
-        src = Sources(db, f"review-{int(time.time())}", credit_limit=2.0)
+        current = latest_run(db)
+        src = Sources(db, current["id"] if current else f"review-{int(time.time())}", credit_limit=(current["credit_limit"] if current else 2.0))
         if path == "/api/approve":
             raw = body.get("tds_rupees")
             override = None
@@ -307,6 +418,7 @@ class Handler(BaseHTTPRequestHandler):
                 investigate(db, invoice_id, src.run_id)
         else:
             raise ValueError("Unknown action")
+        close_finished_runs(db)
         return {"ok": True}
 
 

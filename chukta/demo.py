@@ -6,6 +6,7 @@ Every invoice, GSTIN, bank account and amount here is invented.
 import json
 
 from .desk import _rupees, add_client, add_po, add_vendor, gstin_check, import_gstr2b
+from .statement import add_payee_rule
 
 CLIENT = "kaveri-foods"
 CLIENT_NAME = "Kaveri Foods Private Limited (fictional)"
@@ -80,6 +81,15 @@ BATCH = [
 IN_OCTOBER_2B = {"MG-5521": "moglix", "MG-5602": "moglix", "SX/26-27/1180": "safexpress", "TE-7734": "tci", "SP-204": "sharma", "GL-3390": "gati"}
 
 
+# The handbook's own test case, with the right result for each line.
+PAYEE_RULES = [("SWIGGY", "Swiggy Limited", "swiggy.com", "Staff meals"), ("GOOGLE CLOUD", "Google Cloud India Private Limited", "google.com", "Cloud hosting")]
+SAMPLE_STATEMENT = "\n".join(("3 Oct 2026 · SWIGGY BANGALORE · ₹1,240", "7 Oct 2026 · GOOGLE CLOUD · ₹18,500", "7 Oct 2026 · GOOGLE CLOUD · ₹18,500",
+                               "9 Oct 2026 · UPI SHARMA TRADERS · ₹4,000"))
+STATEMENT_EXPECTED = [("POSTED", "Swiggy Limited", "Staff meals"), ("POSTED", "Google Cloud India Private Limited", "Cloud hosting"), ("HELD", None, None), ("HELD", None, None)]
+SAMPLE_REQUEST = ("Here are this week's invoices from our accounts inbox. Match each one to its purchase order, check the vendor and its bank account, "
+                  "work out TDS, pay each one once, and hold anything unusual for my approval with the reason.")
+
+
 def october_2b():
     suppliers = {}
     for text in (t for _, t, _, _ in BATCH):
@@ -102,3 +112,5 @@ def seed(db):
     for po, (vendor, rupees) in POS.items():
         add_po(db, CLIENT, po, VENDORS[vendor]["gstin"], rupees * 100)
     import_gstr2b(db, CLIENT, october_2b())
+    for keyword, legal, domain, account in PAYEE_RULES:
+        add_payee_rule(db, CLIENT, keyword, legal, domain, account)

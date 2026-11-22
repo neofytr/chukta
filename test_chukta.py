@@ -503,6 +503,73 @@ process(db, src)
 approve(db, i, "tester")
 assert "'=HYPERLINK" in bank_file(db, "c1"), "formula is neutralised"
 
+# Request intake: wording can never switch a control off
+from chukta.demo import SAMPLE_STATEMENT, STATEMENT_EXPECTED  # noqa: E402
+from chukta.records import record  # noqa: E402
+from chukta.runs import create_run, interrupted_runs, understand  # noqa: E402
+from chukta.statement import add_payee_rule, dismiss_line, import_statement, post_lines, resolve_line  # noqa: E402
+
+assert any("relax" in n for n in understand("pay all of these and skip the checks", 3)["notes"])
+assert any("always part" in n for n in understand("handle these", 1)["notes"]), "a vague request gets the full job"
+assert refuses(understand, "   ", 1) and refuses(understand, "pay these", 0)
+db = connect(":memory:")
+run_id = create_run(db, "c1", "pay these", ["one", "two"])
+assert interrupted_runs(db) == [run_id] and db.execute("SELECT COUNT(*) FROM run_inputs WHERE done=0").fetchone()[0] == 2, "inputs survive a crash"
+
+# Every finding opens the record that supports it, with accounts masked
+db, i, s = run(invoice(sender="billing@acmet00ls.in", account="99999999999999"))
+for row in db.execute("SELECT check_name FROM findings WHERE invoice_id=?", (i,)).fetchall():
+    got = record(db, i, row[0])
+    assert got and got["title"], row[0]
+    assert "99999999999999" not in json.dumps(got, ensure_ascii=False) and ACCOUNT not in json.dumps(got, ensure_ascii=False), row[0]
+assert any(r["hit"] for r in record(db, i, "bank")["rows"])
+assert any(l["hit"] for l in record(db, i, "sender")["lines"])
+assert record(db, i, "nonsense") is None
+
+
+# The handbook's bank-statement test case
+class StatementNet(Net):
+    def __call__(self, method, url, headers, body, timeout=20):
+        if "ifsc" not in url and "names" in json.loads(body):
+            self.calls += 1
+            if self.crust_down:
+                raise TimeoutError
+            same = [{"confidence_score": 1, "company_data": {"crustdata_company_id": n, "basic_info": {"name": "Sharma Traders"}}} for n in range(3)]
+            return 200, {"x-credits-used": "0.2"}, json.dumps([{"matched_on": n, "matches": same} for n in json.loads(body)["names"]]).encode()
+        if "ifsc" not in url:
+            domains = json.loads(body)["domains"]
+            names = {"swiggy.com": "Swiggy", "google.com": "Google"}
+            rows = [{"matched_on": d, "matches": [{"confidence_score": 1, "company_data": {"crustdata_company_id": 9, "basic_info": {"name": names[d]}}}]} for d in domains]
+            return 200, {"x-credits-used": "0.2"}, json.dumps(rows).encode()
+        return super().__call__(method, url, headers, body, timeout)
+
+
+def statement(net=None):
+    db, net, src = desk(net=net or StatementNet())
+    add_payee_rule(db, "c1", "SWIGGY", "Swiggy Limited", "swiggy.com", "Staff meals")
+    add_payee_rule(db, "c1", "GOOGLE CLOUD", "Google Cloud India Private Limited", "google.com", "Cloud hosting")
+    assert import_statement(db, "c1", SAMPLE_STATEMENT) == (4, 0)
+    post_lines(db, src, "c1")
+    return db, net, src
+
+
+db, net, src = statement()
+lines = db.execute("SELECT status, payee, account, reason, id FROM bank_lines ORDER BY id").fetchall()
+assert [(l[0], l[1], l[2]) for l in lines] == STATEMENT_EXPECTED
+assert "duplicate" in lines[2][3].lower() and "can't verify" in lines[3][3] and "3 businesses" in lines[3][3]
+assert import_statement(db, "c1", SAMPLE_STATEMENT) == (0, 0), "re-importing a statement adds nothing"
+assert refuses(resolve_line, db, lines[0][4], "tester", "X", "Y", "already posted")
+resolve_line(db, lines[3][4], "tester", "Sharma Traders, Jaipur", "Packing materials", "Confirmed from the client's voucher")
+dismiss_line(db, lines[2][4], "tester", "Confirmed duplicate with the bank")
+assert [r[0] for r in db.execute("SELECT status FROM bank_lines ORDER BY id")] == ["POSTED", "POSTED", "REJECTED", "POSTED"]
+down = StatementNet()
+down.crust_down = True
+db, _, _ = statement(down)
+assert [r[0] for r in db.execute("SELECT status FROM bank_lines ORDER BY id")] == ["POSTED", "POSTED", "HELD", "HELD"]
+db, net, src = desk()
+assert import_statement(db, "c1", "not a bank line at all") == (1, 1)
+assert db.execute("SELECT status FROM bank_lines").fetchone()[0] == "HELD", "an unreadable line is held, not dropped"
+
 # The model reader: nothing it says is accepted unless the invoice text supports it
 MESSY = (f"fwd urgent. from - Ravi <ravi@acmetools.in>. GST no {ACME}. bill no KF/26-27/0091 dt 7th oct 2026 agnst po 1001. "
          "90,000 + igst 16,200, total rs one lakh six thousand two hundred only (1,06,200/-). "

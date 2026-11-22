@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS investigations(invoice_id INTEGER PRIMARY KEY, eviden
     action TEXT NOT NULL, action_text TEXT NOT NULL, citations TEXT NOT NULL, callback TEXT, author TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pay_runs(id INTEGER PRIMARY KEY, started_by TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, client_id TEXT NOT NULL, request TEXT NOT NULL, understood TEXT NOT NULL, stage TEXT NOT NULL,
+    started_at TEXT NOT NULL, finished_at TEXT, credit_limit REAL NOT NULL, time_limit_s INTEGER NOT NULL, model_usd_limit REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS run_inputs(run_id TEXT NOT NULL, n INTEGER NOT NULL, text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, n));
+CREATE TABLE IF NOT EXISTS payee_rules(client_id TEXT NOT NULL, keyword TEXT NOT NULL, legal_name TEXT NOT NULL, domain TEXT NOT NULL, account TEXT NOT NULL,
+    PRIMARY KEY(client_id, keyword));
+CREATE TABLE IF NOT EXISTS bank_lines(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, line_key TEXT NOT NULL UNIQUE, raw TEXT NOT NULL, txn_date TEXT,
+    narration TEXT NOT NULL, amount_paise INTEGER, payee TEXT, account TEXT, status TEXT NOT NULL, reason TEXT, source TEXT, retrieved_at TEXT, resolved_by TEXT);
 """
 REQUIRED = ("invoice_no", "invoice_date", "amount_paise", "gstin")
 # A person cannot approve past these. The document must be corrected or rejected.
