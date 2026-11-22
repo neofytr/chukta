@@ -6,7 +6,7 @@ import math
 import pathlib
 
 SEEDS = {"forest": (158, 36), "bay": (272, 44), "peony": (355, 42), "marigold": (78, 42)}
-LIGHT = dict(primary=40, on_primary=100, primary_container=90, on_primary_container=30)
+LIGHT = dict(primary=40, on_primary=100, primary_container=90, on_primary_container=22)
 DARK = dict(primary=80, on_primary=20, primary_container=30, on_primary_container=90)
 NEUTRAL_LIGHT = dict(surface=98, surface_dim=87, surface_bright=98, surface_container_lowest=100, surface_container_low=96, surface_container=94,
                      surface_container_high=92, surface_container_highest=90, on_surface=10, inverse_surface=20, inverse_on_surface=95)
@@ -59,7 +59,8 @@ def harmonize(hue, seed_hue):
 
 
 def family(prefix, hue, chroma, table):
-    return {k.replace("primary", prefix): tone(hue, chroma, v) for k, v in table.items()}
+    # Containers carry less chroma, which gives the calm tonal look of Pixel surfaces.
+    return {k.replace("primary", prefix): tone(hue, chroma * (.62 if "container" in k else 1), v) for k, v in table.items()}
 
 
 def scheme(hue, chroma, dark):
@@ -71,10 +72,10 @@ def scheme(hue, chroma, dark):
     roles |= family("error", 30, 80, table)
     roles |= family("success", harmonize(145, hue), 52, table)
     roles |= family("warning", harmonize(75, hue), 58, table)
-    roles |= {k: tone(hue, 5, v) for k, v in (NEUTRAL_DARK if dark else NEUTRAL_LIGHT).items()}
-    roles["on_surface_variant"] = tone(hue, 9, 80 if dark else 30)
-    roles["outline"] = tone(hue, 9, 60 if dark else 50)
-    roles["outline_variant"] = tone(hue, 9, 30 if dark else 80)
+    roles |= {k: tone(hue, 3.2, v) for k, v in (NEUTRAL_DARK if dark else NEUTRAL_LIGHT).items()}
+    roles["on_surface_variant"] = tone(hue, 6, 80 if dark else 30)
+    roles["outline"] = tone(hue, 6, 60 if dark else 50)
+    roles["outline_variant"] = tone(hue, 6, 30 if dark else 80)
     roles["inverse_primary"] = tone(hue, chroma, 40 if dark else 80)
     roles["scrim"] = roles["shadow"] = "#000000"
     return roles

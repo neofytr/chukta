@@ -37,9 +37,9 @@ JOB_LOCK = threading.Lock()
 ORDER = {"BLOCKED": 0, "HELD": 1, "NEW": 2, "READY": 3, "APPROVED": 4, "PAID": 5, "REJECTED": 6}
 
 
-def bank_for(db, run_id="payments"):
+def bank_for(db, run_id="payments", on_wait=None):
     try:
-        return RazorpayBank(db, run_id=run_id)
+        return RazorpayBank(db, run_id=run_id, on_wait=on_wait)
     except (ValueError, OSError):
         return SandboxBank(db)
 
@@ -115,7 +115,8 @@ def run_pay(pay_row):
     if current:
         set_stage(db, current["id"], "paying")
     JOB["message"] = "Releasing signed payments"
-    pay_approved(db, SlowBank(bank_for(db, current["id"] if current else "payments")))
+    waiting = lambda seconds: JOB.update(message=f"Razorpay asked us to slow down. Trying again in {seconds} seconds")
+    pay_approved(db, SlowBank(bank_for(db, current["id"] if current else "payments", waiting)))
     left = db.execute("SELECT COUNT(*) FROM invoices WHERE state='APPROVED'").fetchone()[0]
     if not left:
         with db:

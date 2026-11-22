@@ -22,13 +22,16 @@ ContextCon 05, BITS Pilani. Theme 6.1, The Payables Desk.
 
 ## What it does now
 
-1. Reads messy invoices and emails. A model proposes fields, and code accepts each only if the source text supports it.
-2. Runs 15 checks and decides **Ready**, **Held** or **Blocked** using fixed policy.
-3. Catches reformatted duplicates, bank changes, lookalike domains, PO overspend, GST credit at risk and renamed vendors.
-4. Drafts TDS under section 393 and orders payment by MSME deadline.
-5. An investigator agent explains each exception using read-only tools. Code verifies its citations and numbers.
-6. A named reviewer signs, which freezes the payee and amount.
-7. Issues payments in Razorpay test mode, then produces a bank file, Tally vouchers and a replayable audit file.
+1. Takes the request in the customer's words, plans the job and stores its inputs, so a crash loses nothing. Wording cannot switch off a control.
+2. Reads messy invoices and emails. A model proposes fields, and code accepts each only if the source text supports it.
+3. Runs 15 checks and decides **Ready**, **Held** or **Blocked** using fixed policy.
+4. Catches reformatted duplicates, bank changes, lookalike domains, PO overspend, GST credit at risk and renamed vendors.
+5. Drafts TDS under section 393 and orders payment by MSME deadline.
+6. An investigator agent explains each exception using read-only tools. Code verifies its citations and numbers.
+7. A named reviewer signs with a press-and-hold, which freezes the payee and amount.
+8. Issues payments in Razorpay test mode, then produces a bank file, Tally vouchers and a replayable audit file.
+9. Posts bank statement lines to the right payee and account, holds duplicate charges, and says "I can't verify" when no record ties a payment to one business.
+10. Opens the exact record behind every finding, with the supporting field marked and its retrieval date.
 
 **Where it still needs a person:** every payment sign-off, every rejection, every exception, and every vendor master change.
 
@@ -70,6 +73,7 @@ The diagram, component boundaries and failure table are in [docs/architecture.md
 | Test | Result |
 | - | - |
 | Labelled batch on live sources (`eval.py --live`) | 12 of 12 decisions correct |
+| The handbook's bank-statement test case | 4 of 4 lines correct |
 | Paid to a wrong account | 0 |
 | `kill -9` during payment on the real app, Razorpay test mode | 6 invoices, 6 payments |
 | Regression checks (`test_chukta.py`) | All pass, including each bug an independent critic reproduced |
@@ -77,11 +81,25 @@ The diagram, component boundaries and failure table are in [docs/architecture.md
 
 The 12 cases are fictional and were written by us before the run, so they show the behavior but not real-world accuracy. Build notes, including what failed, are in [NOTES.md](NOTES.md).
 
+## Approaches we tried
+
+| Approach | What worked | What did not | Verdict |
+| - | - | - | - |
+| An agent with tools decides and pays | Fast to build | Rewording can change a decision, and a poisoned invoice can steer it | Rejected |
+| Rules with no live data | Repeatable | A convincing impostor passes | Rejected |
+| Models read and explain, code verifies, fixed policy decides | Same decision however it is worded, with a source for each | Needs a vendor master and POs | **Chosen** |
+| Razorpay Orders with a receipt | Simple | A live retry created a second order | Replaced by Payment Links, which reject a repeated reference |
+| Payee from a company name | Easy lookup | "Sharma Traders" matched five businesses | Replaced by firm rules confirmed by domain |
+
+**Hardest case:** a polite bank-change email from the vendor's real domain. Domain checks pass because the mailbox may be compromised. Chukta still blocks it, since it can only pay the account on the vendor master, and gives the reviewer a callback script that uses the number already on file.
+
+The full build log is in [NOTES.md](NOTES.md), and each handbook requirement is mapped to its evidence in [docs/requirements.md](docs/requirements.md).
+
 ## Business case
 
 - **Buyer:** a CA firm running payables for many SME clients.
 - **Proposed price:** ₹40 per invoice, a hypothesis to test with firms. Indian benchmarks for manual or outsourced processing run from roughly [₹60 to ₹150](https://tallysolutions.com/accounting/the-roi-of-accounts-payable-automation-calculating-the-cost-of-a-manual-invoice/) up to [₹250](https://www.incorpx.io/accounts-payable-services), mostly from vendor sources.
-- **Measured cost of a 12-invoice run:** 1 Crustdata credit and about $0.01 of model calls. Half went straight through, and six needed a reviewer. Company lookups are cached, so repeat vendors cost less.
+- **Measured cost of a 12-invoice run:** 1 Crustdata credit and about $0.01 of model calls, or 0.08 credits and $0.00084 per invoice. Half went straight through, and six needed a reviewer. Company lookups are cached, so repeat vendors cost less.
 
 ## Who it could get wrong
 

@@ -15,6 +15,9 @@ All times are IST on 22 November 2026.
 | 11:32 | Kill test on the real app | Account cap and rate limit failed payments, and the run still closed | Refusals go to a person, limits retry, and runs stay open until done |
 | 11:38 | `kill -9` during payment, on Razorpay test mode | Six invoices, six payments | Passing |
 | 11:39 | Real browser | Queue redraws swallowed clicks, and "Paid" overstated a payment link | Redraw only on change, and label it "Issued" |
+| 11:45 | Re-read the handbook line by line | No request intake, no visible plan, sources that did not open, no ledger view, no bank posting, and a crash could lose unread inputs | Built each one |
+| 11:49 | Payee by company name | "Swiggy" and "Sharma Traders" each match several companies at top confidence | Post only through issued payments or firm rules confirmed by domain |
+| 12:27 | Real payment run | Razorpay throttled the sixth payment for about a minute | Retries safely, and the screen says why it is waiting |
 
 ## Approaches weighed
 

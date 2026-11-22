@@ -19,13 +19,13 @@ PACE_S = 1.5  # Razorpay returned 429 on a burst of about ten calls. Tune here i
 
 
 class RazorpayBank:
-    def __init__(self, db, key=None, secret=None, transport=http_call, sleep=time.sleep, run_id="payments"):
+    def __init__(self, db, key=None, secret=None, transport=http_call, sleep=time.sleep, run_id="payments", on_wait=None):
         if key is None:
             env = load_env()
             key, secret = env.get("RAZORPAY_KEY_ID", ""), env.get("RAZORPAY_KEY_SECRET", "")
         if not key.startswith("rzp_test_") or not secret:
             raise ValueError("Chukta runs only on Razorpay test keys")
-        self.db, self.transport, self.sleep, self.run_id = db, transport, sleep, run_id
+        self.db, self.transport, self.sleep, self.run_id, self.on_wait = db, transport, sleep, run_id, on_wait
         self.auth = "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
 
     def _call(self, method, path, payload=None):
@@ -46,6 +46,8 @@ class RazorpayBank:
             if status != 429:
                 return status, reply
             if wait:  # A 429 means nothing was created, so repeating the same reference is safe.
+                if self.on_wait:
+                    self.on_wait(wait)
                 self.sleep(wait)
         raise PaymentUnavailable("Razorpay is rate limiting this key")
 
