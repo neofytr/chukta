@@ -127,7 +127,7 @@ def replay_story(db, client_id):
                 times = db.execute("SELECT COUNT(*) FROM invoices WHERE client_id=? AND fingerprint=? AND state='PAID'", (client_id, inv["fingerprint"])).fetchone()[0]
                 step("Paid exactly once", times == 1 and paid and paid["ref"] == inv["payment_ref"], f"{times} payment, reference {inv['payment_ref']}")
         own = [e["id"] for e in events if e["invoice_id"] == i]
-        step("Audit trail unbroken", broken_at is None or not own or max(own) < broken_at, f"{len(own)} hash-chained events")
+        step("Audit trail unbroken", broken_at is None or not own or max(own) < broken_at, f"{len(own)} hash-chained event{'' if len(own) == 1 else 's'}")
         lines.append({"id": i, "vendor": inv["vendor"] or "Unknown vendor", "number": json.loads(inv["fields"]).get("invoice_no"), "state": inv["state"],
                       "amount": _rupees(inv["amount_paise"]) if inv["amount_paise"] else "Unclear", "ok": all(s["ok"] for s in steps), "steps": steps})
     return {"lines": lines, "ok": broken_at is None and all(l["ok"] for l in lines), "steps": sum(len(l["steps"]) for l in lines), "bad": [l["id"] for l in lines if not l["ok"]], "events": len(events)}

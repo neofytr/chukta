@@ -863,3 +863,38 @@ details.fold > summary { border-radius: inherit; }
   .ring-wrap { width: 112px; height: 112px; } .ring-n b { font-size: 32px; line-height: 34px; }
   .ask-card { border-radius: 22px 52px 22px 52px; padding: 24px 22px 20px; }
 }
+
+/* Today: value and deadlines */
+.hero:has(.hero-art) .wbar, .hero:has(.hero-art) .legend { max-width: calc(100% - 214px); }
+.hero-art { top: 50%; bottom: auto; translate: 0 -50%; right: 26px; width: 200px; height: 150px; }
+.safe { display: flex; align-items: center; gap: 18px; padding: 24px 26px; margin-bottom: 12px; border-radius: 26px 76px 26px 26px; color: var(--md-on-success-container); background: linear-gradient(135deg, var(--md-success-container), color-mix(in oklab, var(--md-success-container) 68%, var(--md-tertiary-container))); }
+.safe-seal { width: 68px; height: 68px; flex: none; display: grid; place-items: center; background: var(--md-success); color: var(--md-on-success); }
+.safe-n { font-size: 34px; line-height: 42px; font-weight: 500; font-variation-settings: "ROND" 100; font-variant-numeric: tabular-nums; }
+.safe-rows { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 13px; opacity: .9; font-variant-numeric: tabular-nums; }
+.soon { background: var(--card); border-radius: 18px 18px 56px 18px; padding: 18px 20px; margin-bottom: 12px; }
+.soon-row { display: grid; grid-template-columns: 50px minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px 0 2px; color: inherit; text-decoration: none; }
+.soon-row b { font-weight: 500; }
+.soon-row small { display: block; color: var(--md-on-surface-variant); font-size: 12px; }
+.date { width: 50px; height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--md-warning-container); color: var(--md-on-warning-container); font-size: 10px; line-height: 12px; font-weight: 600; text-transform: uppercase; }
+.date b { font-size: 18px; line-height: 19px; font-variation-settings: "ROND" 100; }
+@media (max-width: 760px) { .hero:has(.hero-art) .wbar, .hero:has(.hero-art) .legend { max-width: none; } }
+
+/* Imposter Radar and new views, in the existing visual language */
+.radar-hero { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 40px; align-items: center; }
+.scope { position: relative; width: 230px; height: 230px; border-radius: 50%; overflow: hidden; background: radial-gradient(circle, color-mix(in oklab, var(--md-primary) 24%, transparent), color-mix(in oklab, var(--md-primary) 7%, transparent) 72%); box-shadow: inset 0 0 0 2px color-mix(in oklab, currentColor 24%, transparent); }
+.scope > i { position: absolute; border-radius: 50%; box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 20%, transparent); }
+.scope .ring1 { inset: 17%; } .scope .ring2 { inset: 33%; } .scope .ring3 { inset: 8%; }
+.scope .sweep { inset: 0; box-shadow: none; background: conic-gradient(from 0deg, color-mix(in oklab, var(--md-primary) 52%, transparent), transparent 24%); animation: turn 5s linear infinite; }
+.scope.busy .sweep { animation-duration: 1.2s; }
+.scope > b { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; translate: -50% -50%; display: grid; place-items: center; background: var(--md-primary); color: var(--md-on-primary); }
+.blip { position: absolute; width: 16px; height: 16px; translate: -50% -50%; animation: blip 3s var(--ease) infinite; }
+.blip.watch { background: var(--md-error); width: 20px; height: 20px; } .blip.parked { background: var(--md-warning); } .blip.known, .blip.older { background: var(--md-tertiary); } .blip.own { background: var(--md-success); }
+@keyframes blip { 0%, 100% { transform: scale(.82); opacity: .72; } 12% { transform: scale(1.3); opacity: 1; } }
+.radar-band { display: grid; grid-template-columns: 52px minmax(0, 1fr) 24px; gap: 16px; align-items: center; margin-top: 12px; padding: 14px 24px 14px 16px; color: var(--md-inverse-on-surface); background: linear-gradient(120deg, var(--md-inverse-surface), color-mix(in oklab, var(--md-inverse-surface) 82%, var(--md-primary))); border-radius: 40px 16px 40px 16px; text-decoration: none; transition: border-radius var(--mid) var(--spring), transform var(--mid) var(--spring); }
+.radar-band:hover { border-radius: 16px 40px 16px 40px; transform: translateY(-2px); }
+.radar-band b { display: block; font-size: 16px; font-weight: 500; font-variation-settings: "ROND" 100; } .radar-band small { font-size: 13px; opacity: .84; }
+.mini-scope { position: relative; width: 52px; height: 52px; border-radius: 50%; overflow: hidden; box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 40%, transparent); }
+.mini-scope i { position: absolute; inset: 0; background: conic-gradient(from 0deg, var(--md-inverse-primary), transparent 30%); animation: turn 2.6s linear infinite; }
+@media (max-width: 760px) { .radar-hero { grid-template-columns: 1fr; gap: 20px; } .scope { width: 190px; height: 190px; margin: 0 auto; } }
+@media (prefers-reduced-motion: reduce) { .scope .sweep, .mini-scope i, .blip { animation: none !important; } }
+.li.static.radar-row { grid-template-columns: 40px minmax(0, 1fr) auto; }

@@ -800,6 +800,11 @@ _src = Sources(_db, "close", keys=["k"], transport=recorded, sleep=lambda s: Non
 _first = ingest(_db, CLIENT, BATCH[0][1], parse); _twin = ingest(_db, CLIENT, BATCH[6][1], parse); process(_db, _src, AS_OF)
 _pack = close_payload(_db, CLIENT, "2026-10", AS_OF)
 assert _pack["totals"]["invoiced"] == _pack["totals"]["duplicates"] == "₹9,440.00", "a suspected duplicate must not be counted as a second debt"
+from chukta.brief import client_brief
+assert "₹9,440.00" in client_brief(_db, CLIENT)["text"] and "₹9,440.00" in client_brief(_db, CLIENT, "hi")["text"], "the brief quotes the books in both languages"
+from chukta.radar import _demo as radar_check
+radar_check()
+assert route_request("Are there any lookalike domains of my vendors?")["job"] == "radar"
 from chukta.drills import run_drills
 drills = run_drills()
 assert drills["passed"] == drills["total"], [d for d in drills["drills"] if not d["held"]]

@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS investigations(invoice_id INTEGER PRIMARY KEY, eviden
     action TEXT NOT NULL, action_text TEXT NOT NULL, citations TEXT NOT NULL, callback TEXT, author TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pay_runs(id INTEGER PRIMARY KEY, started_by TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS radar_hits(client_id TEXT NOT NULL, domain TEXT NOT NULL, vendor TEXT NOT NULL, real TEXT NOT NULL, level TEXT NOT NULL, mail INTEGER NOT NULL, created TEXT, company TEXT, checked_at TEXT NOT NULL, PRIMARY KEY(client_id, domain));
+CREATE TABLE IF NOT EXISTS receipts(invoice_id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE, intended TEXT, status TEXT NOT NULL, delivered_to TEXT, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS closes(client_id TEXT NOT NULL, period TEXT NOT NULL, signed_by TEXT NOT NULL, pack_hash TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(client_id, period));
 CREATE TABLE IF NOT EXISTS vendor_changes(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, gstin TEXT NOT NULL, invoice_id INTEGER NOT NULL, old_account TEXT NOT NULL,
     old_ifsc TEXT NOT NULL, new_account TEXT NOT NULL, new_ifsc TEXT NOT NULL, proposed_by TEXT NOT NULL, callback_note TEXT NOT NULL, proposed_at TEXT NOT NULL,
@@ -693,7 +695,7 @@ def run_checks(db, src, inv, as_of=None):
         hold = db.execute("SELECT reason FROM payment_holds WHERE client_id=? AND gstin=?", (client, vendor["gstin"])).fetchone()
         if hold:
             add("instruction", "fail", hold["reason"], "the client's request")
-        _check_sender(add, vendor, f["sender_emails"])
+        _check_sender(db, add, vendor, f["sender_emails"])
         _check_company(add, src, vendor)
         _check_msme(add, vendor, inv, as_of)
         _check_credit(add, inv, as_of)
@@ -707,7 +709,7 @@ def run_checks(db, src, inv, as_of=None):
     return out
 
 
-def _check_sender(add, vendor, emails):
+def _check_sender(db, add, vendor, emails):
     real = vendor["domain"]
     source = "email header (a claim, not authenticated)"
     if not emails:
@@ -723,6 +725,8 @@ def _check_sender(add, vendor, emails):
         elif not (domain == real or domain.endswith("." + real)):
             if imitates(domain, real):
                 add("sender", "fail", f"Sender domain {domain} imitates the vendor's {real}.", source, block=True)
+            elif db.execute("SELECT 1 FROM radar_hits WHERE client_id=? AND domain=? AND level='watch'", (vendor["client_id"], domain)).fetchone():
+                add("sender", "fail", f"Imposter Radar already found {domain}, a lookalike of {real} that can send email.", "radar_hits.domain", block=True)
             else:
                 add("sender", "fail", f"Sender domain {domain} is not the vendor's {real}.", source)
             return

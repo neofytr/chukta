@@ -5,6 +5,7 @@ import time
 from .demo import AS_OF, BATCH, CLIENT, recorded, seed
 from .exports import replay_story, tamper_story
 from .desk import SandboxBank, add_client, approve, connect, ingest, parse, pay_approved, process
+from .receipts import issue_receipts, verify_code
 from .runs import understand
 from .sources import Sources
 
@@ -131,6 +132,32 @@ def tampered_books():
     return clean and invoice in caught["bad"] and replay_story(db, CLIENT)["ok"], f"Replay named invoice #{invoice} after one rupee changed."
 
 
+def forged_receipt():
+    db, src = _books()
+    invoice = _signed(db, src)
+    pay_approved(db, SandboxBank(db))
+    mails = []
+    settings = {"SMTP_USER": "team@example.test", "RECEIPT_TEST_INBOX": "inbox@example.test"}
+    issue_receipts(db, CLIENT, lambda message, _: mails.append(message), settings)
+    issue_receipts(db, CLIENT, lambda message, _: mails.append(message), settings)
+    code = db.execute("SELECT code FROM receipts WHERE invoice_id=?", (invoice,)).fetchone()[0]
+    real = verify_code(db, CLIENT, code)["genuine"]
+    fake = verify_code(db, CLIENT, "CHK-AAAA-BBBB-CCCC")["genuine"]
+    with db:
+        db.execute("UPDATE payment_orders SET net_paise=net_paise+100 WHERE invoice_id=?", (invoice,))
+    edited = verify_code(db, CLIENT, code)["genuine"]
+    return real and not fake and not edited and len(mails) == 1 and mails[0]["To"] == "inbox@example.test", "Forged and edited receipts fail. Each receipt is mailed once."
+
+
+def radar_shield():
+    db, src = _books()
+    invoice_text = CLEAN.replace("billing@moglix.com", "billing@moglix.biz")
+    with db:
+        db.execute("INSERT INTO radar_hits VALUES(?,?,?,?,?,?,?,?,?)", (CLIENT, "moglix.biz", "Moglix", "moglix.com", "watch", 1, "2026-10-01", None, "2026-11-22T00:00:00Z"))
+    invoice = _add(db, src, invoice_text)
+    return _state(db, invoice) == "BLOCKED" and _payments(db) == 0, "Blocked on its first invoice, because the radar saw the domain first."
+
+
 DRILLS = [("duplicate", "A paid invoice comes back, reformatted", duplicate),
           ("bank", "Bank details change after sign-off", changed_bank),
           ("po", "The PO is cut after sign-off", changed_po),
@@ -140,7 +167,9 @@ DRILLS = [("duplicate", "A paid invoice comes back, reformatted", duplicate),
           ("crash", "The app dies right after the provider accepts", crash_mid_payment),
           ("client", "The invoice is sent to a second client", second_client),
           ("request", "The request says to skip the checks", skip_checks),
-          ("tamper", "Someone edits one rupee in the books", tampered_books)]
+          ("tamper", "Someone edits one rupee in the books", tampered_books),
+          ("receipt", "A fraudster forges a payment receipt", forged_receipt),
+          ("radar", "A lookalike domain sends its first invoice", radar_shield)]
 
 
 def run_drills():

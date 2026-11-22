@@ -29,7 +29,7 @@ const FILTERS = { needs: ["Needs you", ["BLOCKED", "HELD"]], ready: ["Ready", ["
 const GROUPS = [["Needs your decision", ["BLOCKED", "HELD"]], ["Ready to sign", ["READY"]], ["Signed, waiting to issue", ["APPROVED"]], ["Payment requests issued", ["PAID"]], ["Rejected", ["REJECTED"]], ["Checking", ["NEW"]]];
 
 let S = null, route = ["today"], filter = "needs", sigs = {}, composerOpen = false, useSample = true, draft = null, pollTimer = null, online = true;
-let mounted = "", busyMorph = null, railRefs = null, current = null, drawerKind = null, pending = null, bankDraft = "", booksKind = "vendors", startedExceptions = 0, planOpen = false, drillResult = null, drillBusy = false, listAnim = false, vendorForm = { name: "", domain: "" }, vendorResult = null, vendorBusy = false, vendorAuto = false, closePeriod = null, replayAt = 0, replayBusy = false, replayToken = 0, replayTampered = null, stepRun = "", celebrated = "", lastMessage = "";
+let mounted = "", busyMorph = null, railRefs = null, current = null, drawerKind = null, pending = null, bankDraft = "", booksKind = "vendors", startedExceptions = 0, planOpen = false, drillResult = null, drillBusy = false, listAnim = false, vendorForm = { name: "", domain: "" }, vendorResult = null, vendorBusy = false, vendorAuto = false, closePeriod = null, replayAt = 0, replayBusy = false, replayToken = 0, replayTampered = null, verifyCode = "", verifyResult = null, briefLang = "en", stepRun = "", celebrated = "", lastMessage = "";
 const rollMemory = {}, doneSteps = new Set(), seenLive = new Set();
 const hiddenIds = new Set();
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
@@ -238,6 +238,7 @@ function onRoute() {
   drawerKind = null;
   sigs.detail = "";
   if (before[0] !== route[0] || ["audit", "vendors", "close"].includes(route[0])) { sigs.view = ""; sigs.list = ""; }
+  if (document.activeElement?.matches?.(".dest")) document.getElementById("view").focus({ preventScroll: true });
   if (!S) return;
   renderRail();
   const apply = () => { const done = renderView(); renderDock(); return done; };
@@ -317,9 +318,9 @@ function renderToday() {
     if (sigs.view !== "composer") { sigs.view = "composer"; mount("composer", composer()); }
     return;
   }
-  const key = "run" + JSON.stringify([S.run, S.counts, S.job, S.audit_problems, S.issued, S.payment_run.net, S.invoices.map(i => [i.id, i.state, i.check]), [...hiddenIds]]);
+  const key = "run" + JSON.stringify([S.run, S.counts, S.job, S.audit_problems, S.issued, S.payment_run.net, S.protected, S.invoices.map(i => [i.id, i.state, i.check, i.due]), [...hiddenIds]]);
   if (sigs.view === key) return; sigs.view = key;
-  const r = S.run, busy = S.job.running, steps = stepsFor(), needs = visibleNeeds();
+  const r = S.run, busy = S.job.running, steps = stepsFor(), needs = visibleNeeds(), deadlines = S.invoices.filter(i => i.due && !["PAID", "REJECTED"].includes(i.state)).sort((a, b) => a.due.localeCompare(b.due));
   if (stepRun !== r.id) { stepRun = r.id; doneSteps.clear(); seenLive.clear(); }
   const plan = h("details", { class: "fold", open: busy || planOpen, ontoggle: e => { if (!busy) planOpen = e.target.open; } },
     h("summary", {}, "Plan", h("small", {}, `${steps.filter(s => s.st === "done").length} of ${steps.length} done`), icon("more", 22)),
@@ -336,7 +337,7 @@ function renderToday() {
   mount("today", h("div", { class: "page" }, appbar(shortClient(), [h("span", { class: "note-pill" }, "Fictional client"), providerPill()]),
     h("div", { class: "today-grid" },
       h("div", {}, heroCard(busy), busy && S.invoices.length ? liveRows() : null, !busy && needs.length ? [h("div", { class: "sec", style: { paddingTop: "24px" } }, "Needs you", h("span", {}, String(needs.length))), h("div", { class: "group" }, needs.map(invoiceRow))] : null),
-      h("aside", {}, plan, ceiling, asked))));
+      h("aside", {}, !busy && S.protected.any ? h("section", { class: "safe" }, h("span", { class: "safe-seal", style: { clipPath: shape("puffy") } }, icon("shield", 30, true)), h("div", {}, h("div", { class: "kicker" }, "Stopped before paying"), h("div", { class: "safe-n" }, S.protected.total), h("div", { class: "safe-rows" }, h("span", {}, `Duplicates ${S.protected.duplicates}`), h("span", {}, `Wrong accounts ${S.protected.bank}`)))) : null, !busy && deadlines.length ? h("section", { class: "soon" }, h("div", { class: "title-s" }, "Coming up"), deadlines.slice(0, 3).map(i => { const parts = day(i.due).split(" "); return h("a", { class: "soon-row", href: `#/review/${i.id}` }, h("span", { class: "date", style: { clipPath: shape("soft") } }, h("b", {}, parts[0]), parts[1]), h("span", {}, h("b", {}, i.vendor), h("small", {}, `MSME payment · ${i.net || i.gross}`))); })) : null, plan, ceiling, asked))));
   const seal = document.querySelector(".hero .stamp");
   if (seal && !busy && celebrated !== r.id + S.issued) { celebrated = r.id + S.issued; requestAnimationFrame(() => celebrate(seal)); }
 }
@@ -632,7 +633,7 @@ function openSignNow() {
     h("div", { class: "sign-list" }, p.lines.map(l => h("div", { class: "sign-row" }, h("span", {}, l.vendor, h("small", {}, `${l.number}${l.due ? ` · MSME pay by ${day(l.due)}` : ""}`)), h("b", {}, l.net)))),
     open ? h("p", { class: "body-s", style: { marginBottom: "12px", textAlign: "center" } }, `${plural(open, "exception")} stay${open === 1 ? "s" : ""} out of this run.`) : null,
     h("label", { class: "field" }, h("span", {}, "Reviewer"), nameInput),
-    h("div", { class: "hold-wrap" }, hold, holdLabel, h("p", { class: "body-s", style: { textAlign: "center", fontSize: "12px" } }, `Issues payment requests in ${S.provider}. This can't be undone.`))));
+    h("div", { class: "hold-wrap" }, hold, holdLabel, h("p", { class: "body-s", style: { textAlign: "center", fontSize: "12px" } }, `Issues payment requests in ${S.provider} and a proof receipt for each. This can't be undone.`))));
   dlg.hidden = false; scrim.hidden = false; scrim.onclick = close; release = trap(dlg, close);
   (reviewer() ? hold : nameInput).focus();
 }
@@ -711,7 +712,7 @@ async function renderBooks() {
 }
 
 /* Audit: the finished work, the attacks, and the ledger */
-const auditTabs = () => h("nav", { class: "tabs", "aria-label": "Audit views" }, [["", "Run sheet"], ["replay", "Replay"], ["drills", "Break it"], ["ledger", "Ledger"]].map(([id, label]) =>
+const auditTabs = () => h("nav", { class: "tabs", "aria-label": "Audit views" }, [["", "Run sheet"], ["replay", "Replay"], ["receipts", "Receipts"], ["brief", "Client brief"], ["drills", "Break it"], ["ledger", "Ledger"]].map(([id, label]) =>
   h("a", { href: "#/audit" + (id ? "/" + id : ""), "aria-current": (route[1] || "") === id ? "page" : null }, label)));
 const auditPage = (kind, ...body) => mount("audit-" + kind, h("div", { class: "page" }, appbar("Audit", null, shortClient()), auditTabs(), ...body));
 const exportRow = (href, ic, title, text) => h("a", { class: "export", href, download: "" }, h("span", { class: "sh", style: { clipPath: shapeFor(title) } }, icon(ic, 22)), h("span", {}, h("b", {}, title), h("span", { class: "body-s" }, text)), icon("download", 22));
@@ -725,6 +726,8 @@ async function renderAudit() {
   if (route[1] === "ledger") return renderLedger();
   if (route[1] === "drills") return renderDrills();
   if (route[1] === "replay") return renderReplay();
+  if (route[1] === "receipts") return renderReceipts();
+  if (route[1] === "brief") return renderBrief();
   const d = await get("/api/replay").catch(() => null);
   if (!d || route[0] !== "audit" || route[1]) return;
   const open = S.invoices.filter(i => ["BLOCKED", "HELD"].includes(i.state));
@@ -764,7 +767,7 @@ function renderDrills() {
     h("section", { class: "hero " + (r && r.passed === r.total ? "good" : r ? "" : "quiet"), style: { marginBottom: "12px" } },
       r && r.passed === r.total ? shaped("stamp", "cookie", icon("verified", 34)) : null,
       h("div", { class: "kicker" }, r ? "Attacks stopped" : "Try to break it"),
-      r ? h("div", { class: "amount" }, `${r.passed} of ${r.total}`) : h("div", { class: "headline", style: { margin: "4px 0" } }, "Ten ways this could lose a client's money"),
+      r ? h("div", { class: "amount" }, `${r.passed} of ${r.total}`) : h("div", { class: "headline", style: { margin: "4px 0" } }, "Twelve ways this could lose a client's money"),
       h("div", { class: "sub", style: { maxWidth: "620px" } }, "Runs the real decision and payment code on a private copy of the sample books. Your books, credits and Razorpay are not touched."),
       h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: drillBusy, onclick: run }, icon("play", 22), drillBusy ? "Running" : r ? "Run again" : "Run all attacks"))),
     r ? h("div", { class: "group" }, r.drills.map((x, i) => h("div", { class: "drill" + (x.held ? "" : " bad"), style: { animationDelay: `${i * 80}ms` } },
@@ -819,7 +822,7 @@ const JOBS = [
   { id: "close", title: "Close the month", note: "What's stopping October?", art: "close", request: "Close October for this client and tell me what is stopping it." },
 ];
 const tabs = (base, items) => h("nav", { class: "tabs", "aria-label": "Views" }, items.map(([id, label]) => h("a", { href: `#/${base}${id ? "/" + id : ""}`, "aria-current": (route[1] || "") === id ? "page" : null }, label)));
-const vendorTabs = () => tabs("vendors", [["", "Check a vendor"], ["books", "The books"]]);
+const vendorTabs = () => tabs("vendors", [["", "Check a vendor"], ["radar", "Imposter Radar"], ["books", "The books"]]);
 const closeTabs = () => tabs("close", [["", "Month end"], ["bank", "Bank statement"]]);
 function composer() {
   if (draft === null) draft = S.sample_request;
@@ -856,6 +859,7 @@ function composer() {
       if (to.job === "bank") { composerOpen = false; go("close", "bank"); await post("/api/statement", { sample: true }).catch(e => snack(e.message)); sigs.view = ""; await tick(); return; }
       if (to.job === "vendor") { composerOpen = false; vendorForm = { name: to.name || "", domain: to.domain || "" }; vendorResult = null; vendorAuto = Boolean(to.name && to.domain); go("vendors"); return; }
       if (to.job === "close") { composerOpen = false; go("close"); return; }
+      if (to.job === "radar") { composerOpen = false; go("vendors", "radar"); await post("/api/radar/sweep").catch(e => snack(e.message)); sigs.view = ""; await tick(); return; }
       await post("/api/run", { request: ask.value, ...(useSample ? { sample: true } : { text: pasted.value }) });
       composerOpen = false; sigs.view = ""; await tick();
     } catch (e) { snack(e.message); }
@@ -868,7 +872,7 @@ function composer() {
   const records = h("div", { class: "records" });
   get("/api/books").then(b => records.replaceChildren(h("span", {}, "Checked against"), ...[plural(b.vendors.length, "vendor"), plural(b.pos, "purchase order"), `GSTR-2B ${b.periods.map(human).join(", ") || "not imported"}`, "Crustdata", "IFSC registry"].map(x => h("b", {}, x)))).catch(() => {});
   mark();
-  return h("div", { class: "page" }, appbar(shortClient(), [h("span", { class: "note-pill" }, "Fictional client"), providerPill()]), card, h("section", { class: "jobs", "aria-label": "Jobs Chukta can do" }, tiles), records);
+  return h("div", { class: "page" }, appbar(shortClient(), [h("span", { class: "note-pill" }, "Fictional client"), providerPill()]), card, h("section", { class: "jobs", "aria-label": "Jobs Chukta can do" }, tiles), h("a", { class: "radar-band", href: "#/vendors/radar" }, h("span", { class: "mini-scope" }, h("i", {})), h("span", {}, h("b", {}, "Imposter Radar"), h("small", {}, "Find fake lookalikes of your vendors on the live internet, before their first email")), icon("arrow", 22)), records);
 }
 
 /* Vendors */
@@ -959,10 +963,11 @@ function replaySteps(line, animate) {
     ...line.steps.map(s => h("div", { class: "rstep " + (animate ? "wait" : s.ok ? "ok" : "bad") }, h("span", { class: "rdot", style: { clipPath: shape(s.ok ? "sunny" : "burst") } }, icon(s.ok ? "check" : "x", 16)), h("span", {}, h("b", {}, s.title), h("small", {}, human(s.detail))))));
   return [...box.querySelectorAll(".rstep")];
 }
+function tapeTo(row) { const tape = row?.parentElement; if (tape) tape.scrollTo({ top: row.offsetTop - tape.offsetTop - tape.clientHeight / 2 + row.offsetHeight / 2, behavior: reduced.matches ? "auto" : "smooth" }); }
 function pickReplay(n, data) {
   replayAt = n;
   document.querySelectorAll(".tape-line").forEach((l, i) => l.setAttribute("aria-current", String(i === n)));
-  document.querySelectorAll(".tape-line")[n]?.scrollIntoView({ block: "nearest", behavior: reduced.matches ? "auto" : "smooth" });
+  tapeTo(document.querySelectorAll(".tape-line")[n]);
   return replaySteps(data.lines[n], false);
 }
 async function playReplay(data, stopAtBad) {
@@ -971,7 +976,7 @@ async function playReplay(data, stopAtBad) {
   let checked = 0;
   for (let n = 0; n < data.lines.length; n++) {
     if (run !== replayToken || route[1] !== "replay") return;
-    replayAt = n; rows.forEach((l, i) => l.setAttribute("aria-current", String(i === n))); rows[n].scrollIntoView({ block: "nearest" });
+    replayAt = n; rows.forEach((l, i) => l.setAttribute("aria-current", String(i === n))); tapeTo(rows[n]);
     const line = data.lines[n], steps = replaySteps(line, true);
     for (let i = 0; i < steps.length; i++) {
       await pause(stopAtBad ? 26 : 62);
@@ -980,7 +985,7 @@ async function playReplay(data, stopAtBad) {
       if (status) status.textContent = `${checked} of ${data.steps} checks replayed`;
     }
     rows[n].classList.add(line.ok ? "done" : "bad");
-    if (!line.ok && stopAtBad) { replayBusy = false; if (status) status.textContent = `Caught on line ${n + 1}: ${line.vendor}`; document.getElementById("rsteps").animate([{ transform: "translateX(0)" }, { transform: "translateX(-9px)" }, { transform: "translateX(8px)" }, { transform: "translateX(-5px)" }, { transform: "translateX(0)" }], { duration: 380 }); return; }
+    if (!line.ok && stopAtBad) { replayBusy = false; if (status) status.textContent = `Caught on line ${n + 1}, ${line.vendor}. The real books are untouched.`; document.getElementById("rsteps").animate([{ transform: "translateX(0)" }, { transform: "translateX(-9px)" }, { transform: "translateX(8px)" }, { transform: "translateX(-5px)" }, { transform: "translateX(0)" }], { duration: 380 }); return; }
     await pause(stopAtBad ? 30 : 110);
   }
   replayBusy = false;
@@ -1003,6 +1008,82 @@ async function renderReplay() {
       h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: !d.lines.length, onclick: () => playReplay(d, Boolean(replayTampered)) }, icon("play", 22), "Play"), replayTampered ? h("button", { class: "btn tonal", onclick: back }, icon("back", 20), "Back to the real books") : h("button", { class: "btn tonal", disabled: !paid, title: paid ? "" : "Issue a payment run first", onclick: tamper }, icon("rupee", 20), "Change one rupee"))),
     d.lines.length ? h("div", { class: "replay-grid" }, h("div", { class: "tape", role: "list" }, d.lines.map((l, n) => h("button", { class: "tape-line " + (l.ok ? "" : "bad"), role: "listitem", "aria-current": String(n === replayAt), onclick: () => { replayToken++; replayBusy = false; pickReplay(n, d); } }, h("span", { class: "tl-n" }, String(n + 1).padStart(2, "0")), h("span", { class: "tl-v" }, l.vendor, h("small", {}, l.number || "No number")), h("b", {}, l.amount), h("i", {}, icon(l.ok ? "check" : "x", 15))))), h("section", { class: "rsteps", id: "rsteps", "aria-live": "polite" })) : null);
   if (d.lines.length) pickReplay(Math.min(replayAt, d.lines.length - 1), d);
+}
+
+/* Imposter Radar */
+const RADAR = { watch: ["Can send email", "burst", "fail"], parked: ["Registered, no mail", "gem", "unverified"], known: ["Another real business", "clover", "info"], older: ["Older than the vendor", "pebble", "info"], cleared: ["Cleared by a person", "sunny", "pass"], own: ["Belongs to the vendor", "sunny", "pass"] };
+function radarScope(d, busy) {
+  const blips = d.hits.map(x => {
+    const n = hashOf(x.domain), angle = (n % 360) * Math.PI / 180, reach = { watch: 22, parked: 34, known: 41, older: 41, own: 45, cleared: 45 }[x.level] + (n >> 9) % 5;
+    return h("span", { class: "blip " + x.level, title: `${x.domain}: ${RADAR[x.level][0]}`, style: { left: `${50 + reach * Math.cos(angle)}%`, top: `${50 + reach * Math.sin(angle)}%`, animationDelay: `${(n % 3000)}ms`, clipPath: shape(RADAR[x.level][1]) } });
+  });
+  return h("div", { class: "scope" + (busy ? " busy" : ""), role: "img", "aria-label": `${d.hits.length} registered lookalikes found` }, h("i", { class: "ring1" }), h("i", { class: "ring2" }), h("i", { class: "ring3" }), h("i", { class: "sweep" }), blips, h("b", { style: { clipPath: shape("cookie") } }, icon("shield", 22, true)));
+}
+async function renderRadar() {
+  const d = await get("/api/radar").catch(() => null);
+  if (!d || route[0] !== "vendors" || route[1] !== "radar") return;
+  const busy = S.job.running && S.job.name === "Imposter Radar", key = "radar" + JSON.stringify([d, busy, busy && S.job.message, S.job.running]);
+  if (sigs.view === key) return; sigs.view = key;
+  const start = async () => { try { await post("/api/radar/sweep"); sigs.view = ""; await tick(); } catch (e) { snack(e.message); } };
+  const s = d.swept;
+  mount("radar", h("div", { class: "page" }, appbar("Vendors", null, shortClient()), vendorTabs(),
+    h("section", { class: "hero radar-hero" }, radarScope(d, busy),
+      h("div", {}, h("div", { class: "kicker" }, "Imposter Radar"), h("h2", { class: "display" }, busy ? "Sweeping" : !s ? "Find the fakes first" : d.watch ? `${plural(d.watch, "lookalike")} can email you` : "Nothing can email you"),
+        h("p", { class: "sub" }, busy ? S.job.message : s ? `${s.checked} lookalike names checked for ${plural(s.vendors, "vendor")}. ${plural(d.hits.length, "name")} already registered.${s.unknown ? ` ${s.unknown} could not be checked.` : ""}` : "Before a fraud email arrives, someone has to register the fake domain. Chukta looks for it on the live internet."),
+        h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: S.job.running, onclick: start }, icon("agent", 20), busy ? "Sweeping" : s ? "Sweep again" : "Start the sweep")))),
+    s ? h("section", { class: "stat-row", style: { marginTop: "12px" }, "aria-label": "Radar results" }, stat("Can send email", String(d.watch), "Invoices are blocked"), stat("Registered, no mail", String(d.parked), "Watching"), stat("Likely innocent", String(d.known), "Left alone"), stat("The vendor's own", String(d.own), "Safe")) : null,
+    d.hits.length ? [h("div", { class: "sec" }, "On the live internet", h("span", {}, s ? `Checked ${stamp(s.at)}` : "")),
+      h("div", { class: "group" }, d.hits.map(x => h("div", { class: "li static radar-row" }, h("span", { class: "sh " + RADAR[x.level][2], style: { clipPath: shape(RADAR[x.level][1]) } }, icon(x.level === "watch" ? "mail" : x.level === "parked" ? "link" : ["known", "older"].includes(x.level) ? "building" : "check", 20)),
+        h("span", {}, h("strong", {}, x.domain), h("span", { class: "what" }, `Looks like ${x.real} (${x.vendor}) · ${RADAR[x.level][0]}${x.company ? ` · ${x.company}` : ""}`), h("span", { class: "src" }, `${x.created ? `Registered ${day(x.created)}${x.fresh ? ", under a year ago" : ""}` : "Registration date not public"} · public DNS and RDAP${x.company !== null ? ", Crustdata" : ""}`)), x.level === "watch" ? h("button", { class: "btn text", onclick: async () => { if (await act("/api/radar/clear", { domain: x.domain }, `${x.domain} cleared.`)) { sigs.view = ""; renderRadar(); } } }, "It's legitimate") : ""))),
+      h("p", { class: "body-s", style: { padding: "12px 24px 0" } }, "A lookalike is not proof of fraud. Chukta does not visit or contact these domains. It blocks invoices from names that can send email until a person has looked.")] : null));
+}
+
+/* Receipts */
+const RECEIPT_STATE = { sent: ["Delivered to test inbox", "pass"], outbox: ["In the outbox", "info"], queued: ["Queued", "info"], sending: ["Sending", "info"], failed: ["Not delivered", "unverified"], unclear: ["Delivery unclear", "unverified"] };
+function openReceipt(r) {
+  const sheet = document.getElementById("sheet"), scrim = document.getElementById("scrim"), opener = document.activeElement;
+  let release;
+  const close = () => { leave(sheet); leave(scrim); release(); opener?.focus?.(); };
+  sheet.replaceChildren(h("div", { class: "sheet-h" }, h("div", {}, h("div", { class: "label" }, "Payment receipt"), h("h2", { class: "title", id: "sheet-title" }, r.payee)), h("button", { class: "icon-btn", "aria-label": "Close", onclick: close, id: "sheetClose" }, icon("x"))),
+    h("div", { class: "claim" }, h("div", { class: "label" }, `${r.client} paid`), money(r.net), h("p", { class: "body-s" }, r.note)),
+    h("div", { class: "rec" }, [["Invoice", r.number], ["Account", r.account], ["Gross", r.gross], ["TDS deducted", r.tds], ["GST retained", r.retained], ["Reference", r.reference], ["Signed by", r.signed_by], ["Intended for", r.intended || "No address on file"], ["Delivered to", r.delivered_to || "Not sent"]].map(([a, b]) => h("div", { class: "rec-row" }, h("span", {}, a), h("span", {}, b)))),
+    h("div", { class: "compare", style: { marginTop: "12px", textAlign: "center" } }, h("div", { class: "label" }, "Proof code"), h("div", { class: "digits", style: { justifyContent: "center", display: "block" } }, r.code)));
+  scrim.hidden = false; sheet.hidden = false; scrim.onclick = close; release = trap(sheet, close);
+  document.getElementById("sheetClose").focus();
+}
+async function renderReceipts() {
+  const d = await get("/api/receipts").catch(() => null);
+  if (!d || route[1] !== "receipts") return;
+  const key = "receipts" + JSON.stringify([d, verifyResult]);
+  if (sigs.view === key || document.activeElement?.id === "proofIn") return; sigs.view = key;
+  const input = h("input", { class: "input", id: "proofIn", placeholder: "CHK-XXXX-XXXX-XXXX", value: verifyCode, autocomplete: "off", "aria-label": "Proof code", oninput: e => { verifyCode = e.target.value; } });
+  const check = async code => { verifyCode = code; document.activeElement?.blur?.(); try { verifyResult = await post("/api/receipts/verify", { code }); } catch (e) { snack(e.message); } sigs.view = ""; renderReceipts(); if (verifyResult?.genuine) setTimeout(() => celebrate(document.querySelector(".v-seal")), 120); };
+  const retry = async () => { try { await post("/api/receipts/retry"); snack("Tried again."); sigs.view = ""; renderReceipts(); } catch (e) { snack(e.message); } };
+  const v = verifyResult, sent = d.receipts.filter(r => r.status === "sent").length, waiting = d.receipts.some(r => ["failed", "outbox"].includes(r.status));
+  auditPage("receipts",
+    h("section", { class: "hero" }, h("span", { class: "hero-art" }, art("replay")), h("div", { class: "kicker" }, "Receipts that prove themselves"), h("h2", { class: "display" }, d.receipts.length ? plural(d.receipts.length, "receipt") : "No receipts yet"),
+      h("p", { class: "sub", style: { maxWidth: "560px" } }, d.mail_on ? `${sent} delivered to the team's test inbox, ${d.inbox}. Real vendors are never emailed during the event.` : "Mail is not set up, so receipts wait in the outbox. Add SMTP settings to .env to deliver them to your test inbox."),
+      d.mail_on && waiting ? h("div", { class: "actions" }, h("button", { class: "btn filled", onclick: retry }, icon("mail", 20), "Send waiting receipts")) : null),
+    h("form", { class: "card", style: { marginTop: "12px" }, onsubmit: e => { e.preventDefault(); check(input.value); } }, h("h2", { class: "title", style: { marginBottom: "4px" } }, "Is this receipt genuine?"), h("p", { class: "body-s", style: { marginBottom: "12px" } }, "A vendor or auditor can check any proof code. An edited payment or a made-up code fails."), input,
+      h("div", { class: "actions" }, h("button", { class: "btn filled", type: "submit" }, icon("verified", 20), "Verify"), d.receipts.length ? h("button", { class: "chip", style: { height: "48px" }, type: "button", onclick: () => check(d.receipts[0].code) }, "Try a real code") : null, h("button", { class: "chip", style: { height: "48px" }, type: "button", onclick: () => check("CHK-FAKE-CODE-1234") }, "Try a forged code"))),
+    v ? h("section", { class: "v-verdict " + (v.genuine ? "good" : "stop"), style: { marginTop: "12px" } }, shaped("v-seal", v.genuine ? "cookie" : "burst", icon(v.genuine ? "verified" : "shieldx", 34, true)), h("div", {}, h("div", { class: "kicker" }, v.genuine ? `${v.payee} · ${v.number} · ${v.account}` : "Not genuine"), h("h2", { class: "headline" }, v.genuine ? `${v.net}, issued once` : v.reason), v.genuine ? h("p", { class: "body-s", style: { color: "inherit" } }, `Reference ${v.reference}, signed by ${v.signed_by}`) : null)) : null,
+    d.receipts.length ? [h("div", { class: "sec" }, "Issued"), h("div", { class: "group" }, d.receipts.map(r => h("button", { class: "li", onclick: () => openReceipt(r), "aria-haspopup": "dialog" }, h("span", { class: "sh " + RECEIPT_STATE[r.status][1], style: { clipPath: shapeFor(r.payee) } }, icon("mail", 20)),
+      h("span", {}, h("strong", {}, `${r.payee} · ${r.net}`), h("span", { class: "what" }, `${r.number} · ${r.code}`), h("span", { class: "src" }, `${RECEIPT_STATE[r.status][0]} · for ${r.intended || "no address on file"}`)), icon("chevron", 20))))] : null);
+}
+
+/* Client brief */
+async function renderBrief() {
+  const d = await get(`/api/brief?lang=${briefLang}`).catch(() => null);
+  if (!d || route[1] !== "brief") return;
+  const key = "brief" + JSON.stringify(d);
+  if (sigs.view === key) return; sigs.view = key;
+  const copy = async () => { try { await navigator.clipboard.writeText(d.text); snack("Copied. Read it, then send it yourself."); } catch { snack("Couldn't copy. Select the text instead."); } };
+  auditPage("brief",
+    h("div", { class: "chips", style: { marginBottom: "12px" }, role: "group", "aria-label": "Language" }, [["en", "English"], ["hi", "हिन्दी"]].map(([id, label]) => h("button", { class: "chip", "aria-pressed": String(briefLang === id), onclick: () => { briefLang = id; sigs.view = ""; renderBrief(); } }, label))),
+    h("section", { class: "sheet-doc", lang: d.lang }, h("div", { class: "doc-head" }, h("div", {}, h("h2", { class: "headline" }, d.title), h("p", { class: "body-s" }, d.client)), h("div", { class: "bar-end no-print" }, h("button", { class: "btn tonal", onclick: copy }, icon("copy", 20), "Copy"), h("button", { class: "icon-btn", "aria-label": "Print", title: "Print", onclick: () => print() }, icon("print")))),
+      d.lines.map(x => h("p", { class: "body-l", style: { marginBottom: "6px" } }, x)),
+      d.items.length ? h("div", { class: "doc-foot" }, h("div", {}, h("div", { class: "title-s", style: { marginBottom: "6px" } }, d.open_title), d.items.map(i => h("div", { class: "kv" }, h("span", {}, `${i.vendor}: ${i.issue}`), h("b", {}, i.amount)))), h("div", {}, h("div", { class: "title-s", style: { marginBottom: "6px" } }, d.ask_title), d.asks.map(a => h("p", { class: "body-s", style: { marginBottom: "6px" } }, a)))) : h("p", { class: "body-l", style: { marginTop: "14px" } }, d.clear),
+      h("p", { class: "body-s", style: { marginTop: "18px" } }, d.note)));
 }
 
 /* Motion */
@@ -1042,7 +1123,7 @@ function celebrate(anchor) {
 /* Loop */
 function renderView() {
   if (route[0] === "review") return renderReview();
-  if (route[0] === "vendors") return route[1] === "books" ? renderBooks() : renderVendors();
+  if (route[0] === "vendors") return route[1] === "books" ? renderBooks() : route[1] === "radar" ? renderRadar() : renderVendors();
   if (route[0] === "close") return route[1] === "bank" ? renderBank() : renderClose();
   if (route[0] === "audit") return renderAudit();
   return renderToday();

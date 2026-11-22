@@ -51,6 +51,8 @@ def route_request(text):
     """Sends a request in a customer's words to the right job. Fixed rules, so it cannot be talked out of a control."""
     t = f" {' '.join(str(text).lower().split())} "
     site = re.search(r"\b(?:https?://)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})\b", t)
+    if any(w in t for w in ("lookalike", "look-alike", "imposter", "impostor", "fake domain", "impersonat", "typosquat", "radar")):
+        return {"job": "radar"}
     if any(w in t for w in ("bank statement", "statement line", "bank line", "bank entries", "post these", "post the lines")):
         return {"job": "bank"}
     if re.search(r"\b(month[- ]end|monthly close|close (the |my |our )?(books|month)|close (of )?(january|february|march|april|may|june|july|august|september|october|november|december))\b", t):

@@ -15,6 +15,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from chukta.brief import client_brief
 from chukta.books import books_payload, import_2b, import_pos, import_vendors
 from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
 from chukta.drills import run_drills
@@ -24,7 +25,9 @@ from chukta.close import close_payload, sign_close
 from chukta.exports import audit_file, bank_file, replay_lines, replay_story, tally_vouchers, tamper_story, verify_audit
 from chukta.investigator import ModelDown, investigate, model_chat
 from chukta.razorpay import RazorpayBank
+from chukta.radar import clear_domain, radar_payload, sweep
 from chukta.reader import logged_reader
+from chukta.receipts import issue_receipts, mark_interrupted, receipts_payload, retry_failed, verify_code
 from chukta.records import mask_text, record
 from chukta.runs import route_request, apply_instructions, close_finished_runs, create_run, interrupted_runs, latest_run, model_spend, payment_allowed, set_stage
 from chukta.sources import Sources
@@ -141,6 +144,11 @@ def run_pay(pay_row):
     waiting = lambda seconds: JOB.update(message=f"Razorpay asked us to slow down. Trying again in {seconds} seconds")
     pay_approved(db, SlowBank(bank_for(db, current["id"] if current else "payments", waiting)))
     left = db.execute("SELECT COUNT(*) FROM invoices WHERE state='APPROVED'").fetchone()[0]
+    JOB["message"] = "Sending receipts"
+    try:
+        issue_receipts(db, CLIENT)
+    except Exception as e:  # A mail problem must never disturb a payment that already happened.
+        JOB["error"] = f"Payments are safe, but receipts stopped: {e}"
     if not left:
         with db:
             db.execute("UPDATE pay_runs SET finished_at=? WHERE finished_at IS NULL", (now(),))
@@ -161,9 +169,18 @@ def run_statement(text):
     db.close()
 
 
+def run_radar():
+    db = connect(DB)
+    src = Sources(db, f"radar-{int(time.time())}", credit_limit=8.0, time_limit_s=150)
+    sweep(db, src, CLIENT, lambda text: JOB.update(message=text))
+    db.close()
+
+
 def resume():
     """After a crash: finish interrupted runs, then any payment run a person already released."""
     db = connect(DB)
+    mark_interrupted(db)  # A receipt caught mid-send is never sent again without a person.
+    issue_receipts(db, CLIENT)
     if not db.execute("SELECT 1 FROM clients WHERE id=?", (CLIENT,)).fetchone():
         seed(db)  # Seeded once, so a person's vendor corrections survive a restart.
     runs = interrupted_runs(db)
@@ -193,6 +210,15 @@ def run_block(db):
     return {"id": r["id"], "request": r["request"], "understood": json.loads(r["understood"]), "stage": r["stage"], "started_at": r["started_at"],
             "finished_at": r["finished_at"], "inputs_total": total, "inputs_done": done, "credits": round(credits, 2), "usd": round(usd, 4), "calls": calls,
             "credit_limit": r["credit_limit"], "model_usd_limit": r["model_usd_limit"], "time_limit_s": r["time_limit_s"]}
+
+
+def protected_payload(db):
+    """Money stopped before it left: suspected duplicates and invoices naming an account the vendor master does not hold."""
+    out = {"duplicates": 0, "bank": 0}
+    for amount, checks in db.execute("SELECT i.amount_paise, GROUP_CONCAT(f.check_name) FROM invoices i JOIN findings f ON f.invoice_id=i.id WHERE i.client_id=? "
+                                     "AND i.state IN ('HELD','BLOCKED','REJECTED') AND f.status='fail' AND f.check_name IN ('duplicate','bank','sender') GROUP BY i.id", (CLIENT,)):
+        out["duplicates" if "duplicate" in checks else "bank"] += amount or 0
+    return {"total": _rupees(out["duplicates"] + out["bank"]), "duplicates": _rupees(out["duplicates"]), "bank": _rupees(out["bank"]), "any": bool(out["duplicates"] or out["bank"])}
 
 
 def state_payload(db):
@@ -228,7 +254,7 @@ def state_payload(db):
     return {"client": CLIENT_NAME, "provider": "Razorpay test mode" if isinstance(bank_for(db), RazorpayBank) else "Local sandbox",
             "sample_request": SAMPLE_REQUEST, "sample_count": len(BATCH), "invoices": out, "counts": counts, "issued": _rupees(issued),
             "payment_run": {"lines": run_lines, "gross": _rupees(totals["gross"]), "tds": _rupees(totals["tds"]), "retained": _rupees(totals["retained"]), "net": _rupees(totals["net"])},
-            "job": dict(JOB), "run": run_block(db), "cost": {"credits": round(credits, 2), "usd": round(usd, 4), "calls": calls},
+            "protected": protected_payload(db), "job": dict(JOB), "run": run_block(db), "cost": {"credits": round(credits, 2), "usd": round(usd, 4), "calls": calls},
             "audit_problems": verify_audit(db, CLIENT), "open_pay_run": bool(db.execute("SELECT 1 FROM pay_runs WHERE finished_at IS NULL").fetchone())}
 
 
@@ -346,6 +372,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, books_payload(db, CLIENT))
             if path == "/api/replay":
                 return self._send(200, replay_lines(db, CLIENT))
+            if path == "/api/brief":
+                return self._send(200, client_brief(db, CLIENT, urllib.parse.parse_qs(parsed.query).get("lang", ["en"])[0]))
+            if path == "/api/radar":
+                return self._send(200, radar_payload(db, CLIENT))
+            if path == "/api/receipts":
+                return self._send(200, receipts_payload(db, CLIENT))
             if path == "/api/replay/story":
                 return self._send(200, replay_story(db, CLIENT))
             if path == "/api/close":
@@ -392,6 +424,20 @@ class Handler(BaseHTTPRequestHandler):
             return run_drills()
         if path == "/api/route":
             return route_request(body.get("request") or "")
+        if path == "/api/radar/sweep":
+            if not start_job("Imposter Radar", run_radar):
+                raise ValueError("Chukta is already working")
+            return {"ok": True}
+        if path == "/api/radar/clear":
+            clear_domain(db, CLIENT, str(body.get("domain") or ""), str(body.get("by") or "")[:80])
+            return {"ok": True}
+        if path == "/api/receipts/verify":
+            return verify_code(db, CLIENT, body.get("code"))
+        if path == "/api/receipts/retry":
+            if JOB["running"]:
+                raise ValueError("Chukta is working. Try again when it finishes.")
+            retry_failed(db, CLIENT)
+            return receipts_payload(db, CLIENT)
         if path == "/api/replay/tamper":
             return tamper_story(db, CLIENT)
         if path == "/api/vendor/check":
