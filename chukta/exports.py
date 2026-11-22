@@ -3,7 +3,7 @@ import csv
 import io
 import json
 
-from .desk import _mask, _rupees, evidence_hash, now
+from .desk import _mask, _rupees, decide, event_hash, evidence_hash, now
 
 
 def _safe(value):
@@ -47,6 +47,18 @@ def tally_vouchers(db, client_id):
 def verify_audit(db, client_id):
     """Replays the books. Returns every broken promise, so an empty list means the books hold."""
     problems = []
+    previous = ""
+    for e in db.execute("SELECT * FROM events ORDER BY id"):
+        if e["prev_hash"] != previous or e["hash"] != event_hash(previous, e["invoice_id"], e["event"], e["actor"], e["detail"], e["at"]):
+            problems.append(f"Audit trail altered at event {e['id']}.")
+            break
+        previous = e["hash"]
+    for r in db.execute("SELECT id, state FROM invoices WHERE client_id=? AND state IN ('READY','HELD','BLOCKED')", (client_id,)).fetchall():
+        rows = [tuple(x) for x in db.execute("SELECT invoice_id, check_name, status, severity FROM findings WHERE invoice_id=?", (r["id"],))]
+        if rows and decide(rows) != r["state"]:
+            problems.append(f"Invoice {r['id']}: its decision does not follow from its evidence.")
+    for r in db.execute("SELECT i.id FROM invoices i WHERE i.client_id=? AND i.state='PAID' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.invoice_id=i.id AND e.event='paid')", (client_id,)):
+        problems.append(f"Invoice {r['id']}: issued with no payment event.")
     for o in db.execute("SELECT * FROM payment_orders WHERE client_id=?", (client_id,)).fetchall():
         i = o["invoice_id"]
         if o["net_paise"] != o["gross_paise"] - o["tds_paise"] - o["retained_gst_paise"]:

@@ -80,7 +80,7 @@ def _issued_payment(db, line):
 def post_lines(db, src, client_id):
     new = db.execute("SELECT * FROM bank_lines WHERE client_id=? AND status='NEW' ORDER BY id", (client_id,)).fetchall()
     rules = db.execute("SELECT * FROM payee_rules WHERE client_id=?", (client_id,)).fetchall()
-    rule_for = lambda line: next((r for r in rules if r["keyword"] in _norm(line["narration"])), None)
+    rule_for = lambda line: next((r for r in rules if f" {r['keyword']} " in f" {_norm(line['narration'])} "), None)  # Whole words only.
     domains, names = {r["domain"] for l in new if (r := rule_for(l))}, {n for l in new if not rule_for(l) and (n := _name(l["narration"]))}
     for fetch, items in ((src.identify_many, sorted(domains)), (src.identify_names, sorted(names))):
         try:
@@ -94,6 +94,16 @@ def post_lines(db, src, client_id):
         if twin:
             _hold(db, line, f"Same payee, amount and date as line {twin['id']}. Possible duplicate charge.", f"bank_lines.id={twin['id']}")
             continue
+        if re.search(r"\b(REFUND|REVERSAL|REVERSED|CHARGEBACK|RETURN)\b", _norm(line["narration"])):
+            _hold(db, line, "This looks like a refund or reversal. A person should match it to the original entry.", "statement line")
+            continue
+        rule_now = rule_for(line)
+        if rule_now:
+            earlier = next((e for e in db.execute("SELECT id, narration FROM bank_lines WHERE client_id=? AND id<? AND txn_date=? AND amount_paise=? AND status!='REJECTED'",
+                                                  (client_id, line["id"], line["txn_date"], line["amount_paise"])) if rule_for(e) and rule_for(e)["keyword"] == rule_now["keyword"]), None)
+            if earlier:
+                _hold(db, line, f"Same payee, amount and date as line {earlier['id']}. Possible duplicate charge.", f"bank_lines.id={earlier['id']}")
+                continue
         paid = _issued_payment(db, line)
         if paid:
             _post(db, line, paid["payee_name"], "Accounts payable", f"Matches payment {paid['payment_ref']} issued by Chukta.", f"payment:{paid['payment_ref']}")

@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS investigations(invoice_id INTEGER PRIMARY KEY, eviden
     action TEXT NOT NULL, action_text TEXT NOT NULL, citations TEXT NOT NULL, callback TEXT, author TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pay_runs(id INTEGER PRIMARY KEY, started_by TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vendor_changes(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, gstin TEXT NOT NULL, invoice_id INTEGER NOT NULL, old_account TEXT NOT NULL,
+    old_ifsc TEXT NOT NULL, new_account TEXT NOT NULL, new_ifsc TEXT NOT NULL, proposed_by TEXT NOT NULL, callback_note TEXT NOT NULL, proposed_at TEXT NOT NULL,
+    approved_by TEXT, approved_at TEXT, status TEXT NOT NULL DEFAULT 'PENDING');
+CREATE TABLE IF NOT EXISTS payment_holds(client_id TEXT NOT NULL, gstin TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(client_id, gstin));
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, client_id TEXT NOT NULL, request TEXT NOT NULL, understood TEXT NOT NULL, stage TEXT NOT NULL,
     started_at TEXT NOT NULL, finished_at TEXT, credit_limit REAL NOT NULL, time_limit_s INTEGER NOT NULL, model_usd_limit REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS run_inputs(run_id TEXT NOT NULL, n INTEGER NOT NULL, text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id, n));
@@ -59,7 +63,10 @@ CREATE TABLE IF NOT EXISTS bank_lines(id INTEGER PRIMARY KEY, client_id TEXT NOT
 """
 REQUIRED = ("invoice_no", "invoice_date", "amount_paise", "gstin")
 # A person cannot approve past these. The document must be corrected or rejected.
-HARD_STOPS = ("required", "document", "vendor", "duplicate", "payment_conflict")
+HARD_STOPS = ("required", "document", "vendor", "duplicate", "payment_conflict", "invoice_date", "instruction")
+MIGRATIONS = (("invoices", "master_hash", "TEXT"), ("events", "prev_hash", "TEXT NOT NULL DEFAULT ''"), ("events", "hash", "TEXT NOT NULL DEFAULT ''"))
+STALE_INVOICE_DAYS = 365  # Older than this needs a person. Tune per client.
+REPEAT_ON_PO_DAYS = 180  # Same amount on the same PO inside this window is held as a possible re-presentation.
 OK_STATUSES = ("pass", "info")
 GST_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 NAME_NOISE = {"limited", "ltd", "private", "pvt", "llp", "inc", "india", "corporation", "corp", "co", "company", "the"}
@@ -89,6 +96,9 @@ def connect(path):
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    for table, column, kind in MIGRATIONS:
+        if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     with db:  # Scopes provider references to this set of books, so a fresh demo database cannot collide with an old one.
         db.execute("INSERT OR IGNORE INTO meta VALUES('books_id', ?)", (uuid.uuid4().hex[:12],))
     return db
@@ -278,6 +288,17 @@ def financial_year(iso):
 
 def number_key(invoice_no):
     return "|".join(str(int(p)) if p.isdigit() else p for p in re.findall(r"[A-Z]+|\d+", str(invoice_no).upper()))
+
+
+def number_tokens(invoice_no):
+    """The parts of an invoice number that identify it: MG-5521 and 5521/MG/26-27 are the same set."""
+    text = re.sub(r"(?<!\d)(?:20)?\d{2}-\d{2}(?!\d)", " ", str(invoice_no or "").upper())
+    parts = re.findall(r"[A-Z]+|\d+", text)
+    return frozenset(str(int(p)) if p.isdigit() else p for p in parts if p not in ("INV", "INVOICE", "BILL", "NO"))
+
+
+def master_hash(vendor):
+    return hashlib.sha256(f"{vendor['account']}|{vendor['ifsc']}".encode()).hexdigest() if vendor else None
 
 
 def fingerprint(client_id, gstin, invoice_no, iso_date):
@@ -488,6 +509,13 @@ def run_checks(db, src, inv, as_of=None):
     else:
         add("document", "pass", "Reads as a tax invoice in rupees and its totals agree.", "invoice text")
 
+    if inv["invoice_date"]:
+        age = (date.fromisoformat(as_of) - date.fromisoformat(inv["invoice_date"])).days
+        if age < 0:
+            add("invoice_date", "fail", f"The invoice is dated {inv['invoice_date']}, after today.", "invoice text")
+        elif age > STALE_INVOICE_DAYS:
+            add("invoice_date", "fail", f"The invoice is {age} days old. Confirm it is still payable.", "invoice text")
+
     if f["gstin"]:
         ok = gstin_valid(f["gstin"])
         add("gstin", "pass" if ok else "fail", f"GSTIN {f['gstin']} {'passes' if ok else 'fails'} the checksum.",
@@ -508,14 +536,20 @@ def run_checks(db, src, inv, as_of=None):
             add("duplicate", "pass", "No earlier invoice has this vendor, year and number.", "invoices.fingerprint")
     if inv["gstin"] and inv["amount_paise"] and inv["invoice_date"]:
         this_day = date.fromisoformat(inv["invoice_date"])
-        for r in db.execute("SELECT id, fy, number_core, amount_paise, invoice_date FROM invoices WHERE client_id=? AND gstin=? AND id<? "
+        tokens = number_tokens(f["invoice_no"])
+        for r in db.execute("SELECT id, fy, po, fields, amount_paise, invoice_date FROM invoices WHERE client_id=? AND gstin=? AND id<? "
                             "AND state!='REJECTED' AND fingerprint IS NOT ? AND invoice_date IS NOT NULL ORDER BY id DESC",
                             (client, inv["gstin"], inv["id"], inv["fingerprint"])):
-            if r["fy"] == inv["fy"] and inv["number_core"] is not None and r["number_core"] == inv["number_core"]:
-                add("near_duplicate", "fail", f"Invoice #{r['id']} has the same number with a different format.", f"invoices.id={r['id']}")
+            same_amount = r["amount_paise"] == inv["amount_paise"]
+            days = abs((date.fromisoformat(r["invoice_date"]) - this_day).days)
+            if tokens and tokens == number_tokens(json.loads(r["fields"]).get("invoice_no")) and (r["fy"] == inv["fy"] or same_amount):
+                add("near_duplicate", "fail", f"Invoice #{r['id']} has the same number written differently.", f"invoices.id={r['id']}")
                 break
-            if r["amount_paise"] == inv["amount_paise"] and abs((date.fromisoformat(r["invoice_date"]) - this_day).days) <= 7:
+            if same_amount and days <= 7:
                 add("near_duplicate", "fail", f"Invoice #{r['id']} has the same amount within 7 days.", f"invoices.id={r['id']}")
+                break
+            if same_amount and inv["po"] and r["po"] == inv["po"] and days <= REPEAT_ON_PO_DAYS:
+                add("near_duplicate", "fail", f"Invoice #{r['id']} billed the same amount on {inv['po']} {days} days apart.", f"invoices.id={r['id']}")
                 break
 
     if not f["po"]:
@@ -548,7 +582,12 @@ def run_checks(db, src, inv, as_of=None):
             add("bank", "info", "No bank details on the invoice. Payment uses the vendor master.", "vendors.account")
     if re.search(r"\b(?:new|changed?|updated?|revised|different)\b[^.\n]{0,40}\b(?:bank|account|a/c|ifsc)\b|"
                  r"\b(?:bank|account|a/c|ifsc)\b[^.\n]{0,40}\b(?:changed?|updated?|revised)\b", inv["raw"], re.I):
-        add("bank_request", "fail", "The text asks to change or use new bank details. Confirm on a known phone number.", "invoice text")
+        confirmed = vendor and db.execute("SELECT id, approved_by FROM vendor_changes WHERE client_id=? AND gstin=? AND status='APPROVED' AND new_account=? "
+                                          "ORDER BY id DESC LIMIT 1", (client, vendor["gstin"], vendor["account"])).fetchone()
+        if confirmed and f["accounts"] == [vendor["account"]]:
+            add("bank_request", "pass", f"This bank change was confirmed by callback and approved by {confirmed['approved_by']}.", f"vendor_changes.id={confirmed['id']}")
+        else:
+            add("bank_request", "fail", "The text asks to change or use new bank details. Confirm on a known phone number.", "invoice text")
 
     code = vendor["ifsc"] if vendor else (f["ifscs"][0] if f["ifscs"] else None)
     if code:
@@ -564,6 +603,9 @@ def run_checks(db, src, inv, as_of=None):
 
     _check_gst(add, db, inv, f, vendor)
     if vendor:
+        hold = db.execute("SELECT reason FROM payment_holds WHERE client_id=? AND gstin=?", (client, vendor["gstin"])).fetchone()
+        if hold:
+            add("instruction", "fail", hold["reason"], "the client's request")
         _check_sender(add, vendor, f["sender_emails"])
         _check_company(add, src, vendor)
         _check_msme(add, vendor, inv, as_of)
@@ -657,13 +699,23 @@ def process(db, src, as_of=None):
             db.executemany("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)", findings)
             state = decide(findings)
             vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
-            db.execute("UPDATE invoices SET state=?, due_date=? WHERE id=? AND state='NEW'",
-                       (state, msme_due(vendor, inv["invoice_date"]), inv["id"]))
+            db.execute("UPDATE invoices SET state=?, due_date=?, master_hash=? WHERE id=? AND state='NEW'",
+                       (state, msme_due(vendor, inv["invoice_date"]), master_hash(vendor), inv["id"]))
             _event(db, inv["id"], "checked", "chukta", state)
 
 
+def event_hash(previous, invoice_id, event, actor, detail, at):
+    return hashlib.sha256(json.dumps([previous, invoice_id, event, actor, detail, at], ensure_ascii=False).encode()).hexdigest()
+
+
 def _event(db, invoice_id, event, actor, detail):
-    db.execute("INSERT INTO events(invoice_id, event, actor, detail, at) VALUES(?,?,?,?,?)", (invoice_id, event, actor, detail, now()))
+    """Each event commits to the one before it, so an edited history no longer replays."""
+    if not db.in_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    last = db.execute("SELECT hash FROM events ORDER BY id DESC LIMIT 1").fetchone()
+    previous, at = last[0] if last else "", now()
+    db.execute("INSERT INTO events(invoice_id, event, actor, detail, at, prev_hash, hash) VALUES(?,?,?,?,?,?,?)",
+               (invoice_id, event, actor, detail, at, previous, event_hash(previous, invoice_id, event, actor, detail, at)))
 
 
 def evidence_hash(db, invoice_id):
@@ -705,6 +757,8 @@ def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=Fal
         if inv["state"] == "HELD" and not note.strip():
             raise ValueError("approving a held invoice needs a note saying what the person checked")
         vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
+        if inv["master_hash"] != master_hash(vendor):
+            raise ValueError(f"invoice {invoice_id}: the vendor's bank details changed after this check. Recheck it first.")
         if inv["po"]:
             po = db.execute("SELECT * FROM pos WHERE client_id=? AND po=?", (inv["client_id"], inv["po"])).fetchone()
             if po and po["gstin"] != inv["gstin"]:
@@ -738,6 +792,53 @@ def approve(db, invoice_id, by, note="", tds_override_paise=None, retain_gst=Fal
         db.execute("UPDATE invoices SET state='APPROVED' WHERE id=?", (invoice_id,))
         _event(db, invoice_id, "approved", by, f"{note or 'clean invoice'} | gross {_rupees(inv['amount_paise'])}, TDS {_rupees(tds)}, "
                f"GST retained {_rupees(retained)}, net {_rupees(net)}")
+
+
+def propose_bank_change(db, invoice_id, by, callback_note):
+    """Maker: records the phone call that confirmed new bank details. Nothing changes until a second person approves."""
+    if not by.strip() or len(callback_note.strip()) < 10:
+        raise ValueError("Record who you called, on which known number, and what they confirmed")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        inv = db.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+        if not inv or inv["state"] != "BLOCKED":
+            raise ValueError("Only a blocked invoice can start a bank change")
+        if db.execute("SELECT 1 FROM findings WHERE invoice_id=? AND check_name='sender' AND severity='block'", (invoice_id,)).fetchone():
+            raise ValueError("This came from an imitation domain. Reject it instead of changing the vendor's bank details.")
+        vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
+        f = json.loads(inv["fields"])
+        if not vendor or len(f["accounts"]) != 1 or len(f["ifscs"]) != 1 or f["accounts"][0] == vendor["account"]:
+            raise ValueError("This invoice does not name one clear new bank account")
+        if db.execute("SELECT 1 FROM vendor_changes WHERE client_id=? AND gstin=? AND status='PENDING'", (inv["client_id"], vendor["gstin"])).fetchone():
+            raise ValueError("A bank change for this vendor is already waiting for approval")
+        change = db.execute("INSERT INTO vendor_changes(client_id, gstin, invoice_id, old_account, old_ifsc, new_account, new_ifsc, proposed_by, callback_note, proposed_at) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?)", (inv["client_id"], vendor["gstin"], invoice_id, vendor["account"], vendor["ifsc"], f["accounts"][0], f["ifscs"][0],
+                                                           by.strip(), callback_note.strip()[:500], now())).lastrowid
+        _event(db, invoice_id, "bank_change_proposed", by.strip(), f"{_mask(vendor['account'])} to {_mask(f['accounts'][0])}. {callback_note.strip()[:300]}")
+    return change
+
+
+def approve_bank_change(db, src, change_id, by):
+    """Checker: a different person applies the change, then every open invoice for the vendor is checked again."""
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        c = db.execute("SELECT * FROM vendor_changes WHERE id=?", (change_id,)).fetchone()
+        if not c or c["status"] != "PENDING":
+            raise ValueError("This bank change is not waiting for approval")
+        if not by.strip() or by.strip().casefold() == c["proposed_by"].casefold():
+            raise ValueError("A second person must approve a bank change")
+        vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (c["client_id"], c["gstin"])).fetchone()
+        if (vendor["account"], vendor["ifsc"]) != (c["old_account"], c["old_ifsc"]):
+            raise ValueError("The vendor master changed since this was proposed")
+        db.execute("UPDATE vendors SET account=?, ifsc=? WHERE client_id=? AND gstin=?", (c["new_account"], c["new_ifsc"], c["client_id"], c["gstin"]))
+        db.execute("UPDATE vendor_changes SET status='APPROVED', approved_by=?, approved_at=? WHERE id=?", (by.strip(), now(), change_id))
+        _event(db, c["invoice_id"], "bank_change_approved", by.strip(), f"{_mask(c['old_account'])} to {_mask(c['new_account'])}")
+        open_ids = [r[0] for r in db.execute("SELECT id FROM invoices WHERE client_id=? AND gstin=? AND state IN ('READY','HELD','BLOCKED')", (c["client_id"], c["gstin"]))]
+        for i in open_ids:
+            db.execute("UPDATE invoices SET state='NEW' WHERE id=?", (i,))
+            _event(db, i, "recheck", by.strip(), "vendor bank details changed")
+    process(db, src)
+    return open_ids
 
 
 def reject(db, invoice_id, by, reason):
@@ -802,6 +903,16 @@ def pay_approved(db, bank):
         orders = db.execute("SELECT o.* FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.state='APPROVED' "
                             "ORDER BY COALESCE(i.due_date, '9999'), o.invoice_id").fetchall()
         for o in orders:
+            vendor = db.execute("SELECT account, ifsc FROM vendors WHERE client_id=? AND gstin=?", (o["client_id"], o["payee_gstin"])).fetchone()
+            sent = db.execute("SELECT 1 FROM provider_payments WHERE idempotency_key=?", (o["idempotency_key"],)).fetchone()
+            if not sent and (not vendor or (vendor["account"], vendor["ifsc"]) != (o["account"], o["ifsc"])):
+                with db:  # A signed payment never goes to a master that has moved on. A person must look again.
+                    db.execute("INSERT OR REPLACE INTO findings VALUES(?,?,?,?,?,?,?)",
+                               (o["invoice_id"], "master_changed", "fail", "hold", "The vendor's bank details changed after sign-off. Recheck and sign again.", "vendors.account", today()))
+                    db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (o["invoice_id"],))
+                    db.execute("UPDATE invoices SET state='HELD' WHERE id=? AND state='APPROVED'", (o["invoice_id"],))
+                    _event(db, o["invoice_id"], "master_changed", "chukta", "payment stopped")
+                continue
             try:
                 ref = bank.pay(o["idempotency_key"], o["account"], o["ifsc"], o["net_paise"])
             except PaymentUnavailable as e:

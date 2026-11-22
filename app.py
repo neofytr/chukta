@@ -15,14 +15,14 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
-from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, compute_tds, connect, ingest, now, parse, pay_approved, process,
-                         recheck, reject)
+from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, approve_bank_change, compute_tds, connect, ingest, now, parse, pay_approved, process,
+                         propose_bank_change, recheck, reject)
 from chukta.exports import audit_file, bank_file, replay_lines, tally_vouchers, verify_audit
 from chukta.investigator import ModelDown, investigate, model_chat
 from chukta.razorpay import RazorpayBank
 from chukta.reader import logged_reader
 from chukta.records import mask_text, record
-from chukta.runs import close_finished_runs, create_run, interrupted_runs, latest_run, model_spend, set_stage
+from chukta.runs import apply_instructions, close_finished_runs, create_run, interrupted_runs, latest_run, model_spend, payment_allowed, set_stage
 from chukta.sources import Sources
 from chukta.statement import dismiss_line, import_statement, post_lines, resolve_line, statement_payload
 
@@ -96,6 +96,7 @@ def run_batch(run_id):
         with db:
             db.execute("UPDATE run_inputs SET done=1 WHERE run_id=? AND n=?", (run_id, row["n"]))
     set_stage(db, run_id, "checking")
+    apply_instructions(db, run)
     JOB["message"] = "Checking each invoice against independent records"
     process(db, Sources(db, run_id, credit_limit=run["credit_limit"], time_limit_s=run["time_limit_s"]))
     set_stage(db, run_id, "investigating")
@@ -222,6 +223,8 @@ def invoice_payload(db, invoice_id):
     note = db.execute("SELECT * FROM investigations WHERE invoice_id=?", (invoice_id,)).fetchone()
     order = db.execute("SELECT gross_paise, tds_paise, retained_gst_paise, net_paise, approved_by FROM payment_orders WHERE invoice_id=?", (invoice_id,)).fetchone()
     company = next((x for x in findings if x["check_name"] == "company"), None)
+    change = db.execute("SELECT id, proposed_by, callback_note, new_account FROM vendor_changes WHERE client_id=? AND gstin=? AND status='PENDING' ORDER BY id DESC LIMIT 1", (r["client_id"], r["gstin"])).fetchone()
+    sender_blocked = any(x["check_name"] == "sender" and x["severity"] == "block" for x in findings)
     net = order["net_paise"] if order else (r["amount_paise"] - tds if r["amount_paise"] and tds is not None else None)
     return {"id": r["id"], "state": r["state"], "number": fields.get("invoice_no"), "date": r["invoice_date"], "po": r["po"],
             "vendor": vendor["name"] if vendor else "Unknown vendor", "gstin": r["gstin"], "net": _rupees(net) if net else "Unclear",
@@ -234,7 +237,9 @@ def invoice_payload(db, invoice_id):
             "payment_ref": r["payment_ref"], "raw": mask_text(r["raw"]),
             "can_approve": r["state"] in ("READY", "HELD") and not (failing & set(HARD_STOPS)), "needs_tds": tds is None and bool(vendor),
             "can_retain_gst": "gst" in failing and bool(r["tax_paise"]),
-            "can_alias": bool(company and company["status"] == "unverified" and "resolves to" in company["detail"])}
+            "can_alias": bool(company and company["status"] == "unverified" and "resolves to" in company["detail"]),
+            "can_propose_bank": r["state"] == "BLOCKED" and "bank" in failing and not sender_blocked and not change,
+            "bank_change": {"id": change["id"], "by": change["proposed_by"], "note": change["callback_note"], "account": "****" + change["new_account"][-4:]} if change else None}
 
 
 def ledger_payload(db):
@@ -377,6 +382,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 dismiss_line(db, line_id, by, note)
             return {"ok": True}
+        if path in ("/api/signoff", "/api/pay") and not payment_allowed(db):
+            raise ValueError("This run was checks only. Start a new run to pay.")
         if path == "/api/signoff":
             ids = [r[0] for r in db.execute("SELECT id FROM invoices WHERE client_id=? AND state='READY'", (CLIENT,))]
             for i in ids:
@@ -392,6 +399,14 @@ class Handler(BaseHTTPRequestHandler):
                 with db:
                     row = db.execute("INSERT INTO pay_runs(started_by, started_at) VALUES(?,?)", (by, now())).lastrowid
             start_job("Paying", run_pay, row)
+            return {"ok": True}
+        if path == "/api/bank-change/approve":
+            current = latest_run(db)
+            src = Sources(db, current["id"] if current else f"review-{int(time.time())}", credit_limit=(current["credit_limit"] if current else 2.0))
+            for i in approve_bank_change(db, src, int(body.get("change", 0)), by):
+                if db.execute("SELECT state FROM invoices WHERE id=?", (i,)).fetchone()[0] in ("HELD", "BLOCKED"):
+                    investigate(db, i, src.run_id)
+            close_finished_runs(db)
             return {"ok": True}
         invoice_id = int(body.get("id", 0))
         if not db.execute("SELECT 1 FROM invoices WHERE id=? AND client_id=?", (invoice_id, CLIENT)).fetchone():
@@ -413,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
             recheck(db, src, invoice_id, by)
             if db.execute("SELECT state FROM invoices WHERE id=?", (invoice_id,)).fetchone()[0] in ("HELD", "BLOCKED"):
                 investigate(db, invoice_id, src.run_id)
+        elif path == "/api/bank-change/propose":
+            propose_bank_change(db, invoice_id, by, note)
         elif path == "/api/alias":
             add_alias(db, src, invoice_id, by)
             if db.execute("SELECT state FROM invoices WHERE id=?", (invoice_id,)).fetchone()[0] in ("HELD", "BLOCKED"):

@@ -1,5 +1,6 @@
 """Takes a request in a customer's words, plans the job, and keeps its inputs safe through a crash."""
 import json
+import re
 import time
 import uuid
 
@@ -14,6 +15,9 @@ WANTS = (("Match each invoice to its PO", ("match", "purchase order", " po", "po
          ("Hold anything unusual with the reason", ("hold", "unusual", "exception", "flag", "approval")))
 UNSAFE = ("skip", "without approval", "no approval", "without check", "don't check", "do not check", "dont check", "bypass", "ignore",
           "auto approve", "auto-approve", "no need to verify", "pay everything", "pay all")
+SCOPE_WORDS = ("invoice", "bill", "payable", "payment", "vendor", "supplier", "pay ", "process", "handle", "these", "books")
+CHECK_ONLY = ("check only", "only check", "just check", "dry run", "no payment", "without paying", "don't pay anything", "do not pay anything")
+NO_PAY = re.compile(r"(?:do not|don't|dont|never)\s+pay\s+([a-z0-9&. -]+?)(?=\s*(?:[,;]|\.(?:\s|$)|\b(?:and|but|this|for|until|yet|today|now)\b|$))")
 FINISHED = "A signed payment run, each invoice issued once, every exception explained, and an audit file that replays each decision."
 
 
@@ -24,6 +28,10 @@ def understand(request, invoice_count):
         raise ValueError("Tell Chukta what you need done")
     if not invoice_count:
         raise ValueError("Add at least one invoice")
+    if not any(w in text for w in SCOPE_WORDS):
+        raise ValueError("Chukta runs payables. Tell it what to do with these invoices.")
+    check_only = any(w in text for w in CHECK_ONLY)
+    no_pay = sorted({m.strip(" .") for m in NO_PAY.findall(text.strip()) if m.strip(" .") not in ("anything", "twice", "it", "them", "any", "all")})
     asked = [label for label, words in WANTS if any(w in text for w in words)]
     assumed = [label for label, _ in WANTS if label not in asked]
     notes = []
@@ -31,7 +39,11 @@ def understand(request, invoice_count):
         notes.append("Not mentioned, but always part of the job: " + ", ".join(a[0].lower() + a[1:] for a in assumed) + ".")
     if any(w in text for w in UNSAFE):
         notes.append("The request asks to relax a control. Every check and your sign-off stay on.")
-    return {"job": f"Run payables for {invoice_count} invoice{'s' if invoice_count != 1 else ''}", "finished": FINISHED,
+    if check_only:
+        notes.append("You asked for checks only. Nothing will be signed or issued in this run.")
+    for name in no_pay:
+        notes.append(f"You asked not to pay {name.title()}. Its invoices stay held.")
+    return {"check_only": check_only, "no_pay": no_pay, "job": f"{'Check' if check_only else 'Run payables for'} {invoice_count if check_only else ''}".replace("  ", " ").strip() + (" invoices" if check_only else "") if check_only else f"Run payables for {invoice_count} invoice{'s' if invoice_count != 1 else ''}", "finished": FINISHED,
             "steps": [label for label, _ in WANTS], "notes": notes}
 
 
@@ -43,6 +55,23 @@ def create_run(db, client_id, request, texts):
                    (run_id, client_id, request.strip(), json.dumps(plan), "reading", now(), None, CREDIT_LIMIT, TIME_LIMIT_S, MODEL_USD_LIMIT))
         db.executemany("INSERT INTO run_inputs VALUES(?,?,?,0)", [(run_id, n, t) for n, t in enumerate(texts)])
     return run_id
+
+
+def apply_instructions(db, run):
+    """Turns "do not pay X" into a hold that survives rechecks, and that no approval can pass."""
+    plan = json.loads(run["understood"])
+    with db:
+        db.execute("DELETE FROM payment_holds WHERE client_id=?", (run["client_id"],))
+        for name in plan.get("no_pay", []):
+            words = set(re.findall(r"[a-z0-9]+", name))
+            for v in db.execute("SELECT gstin, name FROM vendors WHERE client_id=?", (run["client_id"],)).fetchall():
+                if words and words <= set(re.findall(r"[a-z0-9]+", v["name"].lower())):
+                    db.execute("INSERT OR REPLACE INTO payment_holds VALUES(?,?,?)", (run["client_id"], v["gstin"], f"The client's request says not to pay {v['name']}."))
+
+
+def payment_allowed(db):
+    run = latest_run(db)
+    return not (run and json.loads(run["understood"]).get("check_only"))
 
 
 def set_stage(db, run_id, stage):

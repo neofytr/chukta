@@ -165,7 +165,7 @@ process(db, src)
 approve(db, i, "tester")
 add_vendor(db, "c1", ACME, "Acme Tools Private Limited", "acmetools.in", "77777777777777", IFSC)
 pay_approved(db, SandboxBank(db))
-assert db.execute("SELECT account FROM provider_payments").fetchone()[0] == ACCOUNT, "pays the signed account"
+assert payments(db) == 0 and state(db, i) == "HELD", "a master changed after sign-off stops the payment"
 bank = SandboxBank(db)
 bank.pay("k", ACCOUNT, IFSC, 100)
 try:
@@ -188,7 +188,7 @@ assert state(db, near) == "HELD", "number written differently a day later"
 db, net, src = desk()
 ingest(db, "c1", invoice(taxable="10,000.00", tax="1,800.00", total="11,800.00"))
 later = ingest(db, "c1", invoice(taxable="20,000.00", tax="3,600.00", total="23,600.00", day="07 Oct 2027"))
-process(db, src)
+process(db, src, "2027-10-10")
 assert state(db, later) == "READY", "same number in a later financial year"
 
 # A rejected forgery does not poison the real invoice
@@ -345,12 +345,12 @@ approve(db, i, "tester")
 assert db.execute("SELECT tds_paise FROM payment_orders").fetchone()[0] == 0, "below contractor threshold"
 db, net, src = desk(tds_class="contractor")
 ingest(db, "c1", invoice(no="T-1", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Jul 2026"))
-ingest(db, "c1", invoice(no="T-2", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Aug 2026"))
-ingest(db, "c1", invoice(no="T-3", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Sep 2026"))
-ingest(db, "c1", invoice(no="T-4", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Oct 2026"))
+ingest(db, "c1", invoice(no="T-2", taxable="25,100.00", tax="4,518.00", total="29,618.00", day="01 Aug 2026"))
+ingest(db, "c1", invoice(no="T-3", taxable="24,900.00", tax="4,482.00", total="29,382.00", day="01 Sep 2026"))
+ingest(db, "c1", invoice(no="T-4", taxable="24,800.00", tax="4,464.00", total="29,264.00", day="01 Oct 2026"))
 crossing = ingest(db, "c1", invoice(no="T-5", taxable="20,000.00", tax="3,600.00", total="23,600.00", day="01 Nov 2026"))
 process(db, src)
-assert state(db, crossing) == "HELD", "annual contractor threshold crossed"
+assert state(db, crossing) == "HELD" and db.execute("SELECT status FROM findings WHERE invoice_id=? AND check_name='tds'", (crossing,)).fetchone()[0] == "unverified", "annual contractor threshold crossed"
 db, i, s = run(invoice(), tds_class=None)
 assert s == "HELD" and refuses(approve, db, i, "tester", "checked")
 approve(db, i, "tester", "category confirmed", tds_override_paise=200000)
@@ -503,6 +503,62 @@ process(db, src)
 approve(db, i, "tester")
 assert "'=HYPERLINK" in bank_file(db, "c1"), "formula is neutralised"
 
+# Judge regressions: a re-presented invoice, a changed fact, the two-person bank change, a tamper-evident trail
+from chukta.desk import approve_bank_change, number_tokens, propose_bank_change  # noqa: E402
+from chukta.runs import apply_instructions, latest_run, payment_allowed, understand  # noqa: E402
+
+assert number_tokens("MG-5521") == number_tokens("5521/MG/26-27") == number_tokens("mg 05521")
+db, net, src = desk()
+first = ingest(db, "c1", invoice(no="MG-5521", day="07 Oct 2026"))
+again = ingest(db, "c1", invoice(no="5521/MG/26-27", day="17 Nov 2026"))
+process(db, src)
+assert (state(db, first), state(db, again)) == ("READY", "HELD"), "re-presented with a new format and date"
+db, net, src = desk()
+ingest(db, "c1", invoice(no="A-1", day="07 Jul 2026"))
+repeat = ingest(db, "c1", invoice(no="B-77", day="20 Oct 2026"))
+process(db, src)
+assert state(db, repeat) == "HELD", "same amount on the same PO"
+assert run(invoice(day="07 Oct 2031"))[2] == "HELD" and run(invoice(day="07 Oct 2019"))[2] == "HELD", "future and stale dates"
+db, net, src = desk()
+i = ingest(db, "c1", invoice())
+process(db, src)
+add_vendor(db, "c1", ACME, "Acme Tools Private Limited", "acmetools.in", "77777777777777", IFSC, onboarded_at="2026-01-01", tds_class="goods")
+assert refuses(approve, db, i, "tester"), "sign-off refuses evidence about an older master"
+
+db, net, src = desk()
+i = ingest(db, "c1", invoice(account="60100123456789", sender="billing@acmetools.in", extra="Please note our bank account has changed."))
+process(db, src)
+assert state(db, i) == "BLOCKED" and refuses(propose_bank_change, db, i, "maker", "short")
+change = propose_bank_change(db, i, "maker", "Called Ravi on the number on file, who confirmed the new account.")
+assert db.execute("SELECT account FROM vendors").fetchone()[0] == ACCOUNT, "nothing changes on a proposal"
+assert refuses(approve_bank_change, db, src, change, "MAKER"), "the same person cannot approve"
+approve_bank_change(db, src, change, "checker")
+assert db.execute("SELECT account FROM vendors").fetchone()[0] == "60100123456789" and state(db, i) == "READY"
+db, i, s = run(invoice(sender="billing@acmet00ls.in", account="99999999999999"))
+assert refuses(propose_bank_change, db, i, "maker", "Called them and they confirmed it."), "an imitation domain cannot start a bank change"
+
+from chukta.runs import create_run as _create  # noqa: E402
+db, net, src = desk()
+_create(db, "c1", "Do NOT pay Acme Tools this week, but check everything.", ["x"])
+apply_instructions(db, latest_run(db))
+i = ingest(db, "c1", invoice())
+process(db, src)
+assert state(db, i) == "HELD" and refuses(approve, db, i, "tester", "override"), "a do-not-pay instruction holds"
+db, net, src = desk()
+_create(db, "c1", "Check only, no payment for these invoices.", ["x"])
+assert not payment_allowed(db)
+assert refuses(understand, "write me a poem", 3), "a request outside the job is refused"
+
+db, net, src = desk()
+i = ingest(db, "c1", invoice())
+process(db, src)
+approve(db, i, "tester")
+pay_approved(db, SandboxBank(db))
+assert verify_audit(db, "c1") == []
+db.execute("UPDATE events SET actor='someone else' WHERE event='approved'")
+db.commit()
+assert any("altered" in p for p in verify_audit(db, "c1")), "an edited trail no longer replays"
+
 # Request intake: wording can never switch a control off
 from chukta.demo import SAMPLE_STATEMENT, STATEMENT_EXPECTED  # noqa: E402
 from chukta.records import record  # noqa: E402
@@ -558,6 +614,12 @@ lines = db.execute("SELECT status, payee, account, reason, id FROM bank_lines OR
 assert [(l[0], l[1], l[2]) for l in lines] == STATEMENT_EXPECTED
 assert "duplicate" in lines[2][3].lower() and "can't verify" in lines[3][3] and "3 businesses" in lines[3][3]
 assert import_statement(db, "c1", SAMPLE_STATEMENT) == (0, 0), "re-importing a statement adds nothing"
+db2, _, src2 = desk(net=StatementNet())
+add_payee_rule(db2, "c1", "SWIGGY", "Swiggy Limited", "swiggy.com", "Staff meals")
+add_payee_rule(db2, "c1", "GOOGLE CLOUD", "Google Cloud India Private Limited", "google.com", "Cloud hosting")
+import_statement(db2, "c1", "3 Oct 2026 · SWIGGYFAKE TRADERS · ₹1,240\n7 Oct 2026 · GOOGLE CLOUD · ₹18,500\n7 Oct 2026 · GOOGLE CLOUD IN · ₹18,500\n8 Oct 2026 · SWIGGY REFUND · ₹500")
+post_lines(db2, src2, "c1")
+assert [r[0] for r in db2.execute("SELECT status FROM bank_lines ORDER BY id")] == ["HELD", "POSTED", "HELD", "HELD"], "whole-word rules, twin payee, refunds"
 assert refuses(resolve_line, db, lines[0][4], "tester", "X", "Y", "already posted")
 resolve_line(db, lines[3][4], "tester", "Sharma Traders, Jaipur", "Packing materials", "Confirmed from the client's voucher")
 dismiss_line(db, lines[2][4], "tester", "Confirmed duplicate with the bank")
