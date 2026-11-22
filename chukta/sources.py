@@ -268,3 +268,36 @@ class Sources:
 
     def identify(self, domain):
         return self.identify_many([domain])[domain.lower()]
+
+    def enrich(self, domain):
+        """The full company record for a new vendor: 2 credits, cached, and never read as a pass when it fails."""
+        domain = domain.lower()
+        key = f"enrich:{domain}"
+        if hit := self._cached(key):
+            return hit
+        value = {"match": None, "retrieved_at": time.strftime("%Y-%m-%d")}
+        if domain.rsplit(".", 1)[-1] in ("test", "example", "invalid", "localhost"):
+            return value
+        try:
+            rows = self._request("crustdata", "/company/enrich", API + "/company/enrich",
+                                 {"domains": [domain], "fields": ["basic_info", "headcount", "locations"]}, estimate=2.0, missing_ok=True)
+        except InvalidDomains:
+            return value
+        try:
+            matches = rows[0]["matches"] if rows else []
+            if matches:
+                data = matches[0]["company_data"]
+                info, people, place = data["basic_info"], data.get("headcount") or {}, data.get("locations") or {}
+                if not (isinstance(info["name"], str) and info["name"].strip()):
+                    raise ValueError("no company name")
+                series = [p for p in people.get("timeseries") or [] if isinstance(p.get("employee_count"), (int, float))]
+                recent = series[-53:][::-4][::-1]
+                value["match"] = {"id": data.get("crustdata_company_id"), "name": info["name"], "domain": info.get("primary_domain"), "all_domains": info.get("all_domains") or [],
+                                  "status": info.get("status"), "year_founded": info.get("year_founded"), "type": info.get("company_type"), "range": info.get("employee_count_range"),
+                                  "employees": people.get("total"), "country": people.get("largest_headcount_country"), "hq": place.get("headquarters") or place.get("city"),
+                                  "as_of": series[-1]["date"] if series else None, "trend": [int(p["employee_count"]) for p in recent], "confidence": _number(matches[0].get("confidence_score"))}
+        except (KeyError, TypeError, AttributeError, IndexError, ValueError) as e:
+            self.down["crustdata"] = "Crustdata returned an unusable record"
+            raise SourceDown(self.down["crustdata"]) from e
+        self._store(key, value)
+        return value

@@ -767,6 +767,39 @@ def down(text):
 assert read_invoice(invoice(), down)["amount_paise"] == 11800000, "falls back to the parser"
 
 from chukta.desk import HARD_STOPS
+from chukta.close import close_payload, previous_month, sign_close
+from chukta.demo import AS_OF, BATCH, CLIENT, recorded, seed
+from chukta.exports import replay_story
+from chukta.runs import route_request
+from chukta.vendorcheck import check_vendor, clean_domain
+assert route_request("Post these bank statement lines from October 2026 to the right payee and account.")["job"] == "bank"
+assert route_request("Here are this week's invoices. Check the vendor and its bank account, pay each once.")["job"] == "pay"
+assert route_request("Close October for this client")["job"] == "close"
+assert route_request("Here is a new vendor's name and website: Acme Tools, acmetools.in. Is it a real, trading business?") == {"job": "vendor", "domain": "acmetools.in", "name": "Acme Tools"}
+assert clean_domain("https://www.Moglix.com/about") == "moglix.com" and previous_month("2026-11-22") == "2026-10"
+class _Crust:
+    def __init__(self, status="active", name="Moglix", fail=False): self.status, self.name, self.fail = status, name, fail
+    def __call__(self, method, url, headers, body, timeout=20):
+        if self.fail: raise TimeoutError
+        info = {"name": self.name, "primary_domain": json.loads(body)["domains"][0], "status": self.status, "year_founded": 2015}
+        people = {"total": 1400, "timeseries": [{"date": "2026-11-01", "employee_count": 1400}]}
+        return 200, {"x-credits-used": "2"}, json.dumps([{"matches": [{"confidence_score": 1, "company_data": {"crustdata_company_id": 1, "basic_info": info, "headcount": people}}]}]).encode()
+def _vendor(domain, name="Moglix", **net):
+    db = connect(":memory:"); seed(db)
+    return check_vendor(db, Sources(db, "v", keys=["k"], transport=_Crust(**net), sleep=lambda s: None), CLIENT, name, domain)["verdict"]
+assert _vendor("moglix.com") == "REAL" and _vendor("mogIix.com".lower().replace("l", "ll")) == "STOP", "a lookalike of a vendor must stop"
+assert _vendor("acme.in", status="deleted") == "STOP" and _vendor("acme.in", name="Other Name") == "LOOK" and _vendor("acme.in", fail=True) == "LOOK", "a failed source is never a pass"
+_db = connect(":memory:"); seed(_db)
+assert not close_payload(_db, CLIENT, "2026-10", AS_OF)["ready"], "an empty month cannot close"
+try:
+    sign_close(_db, CLIENT, "2026-10", "Reviewer"); raise AssertionError("closed with open items")
+except ValueError:
+    pass
+assert replay_story(_db, CLIENT)["ok"]
+_src = Sources(_db, "close", keys=["k"], transport=recorded, sleep=lambda s: None)
+_first = ingest(_db, CLIENT, BATCH[0][1], parse); _twin = ingest(_db, CLIENT, BATCH[6][1], parse); process(_db, _src, AS_OF)
+_pack = close_payload(_db, CLIENT, "2026-10", AS_OF)
+assert _pack["totals"]["invoiced"] == _pack["totals"]["duplicates"] == "₹9,440.00", "a suspected duplicate must not be counted as a second debt"
 from chukta.drills import run_drills
 drills = run_drills()
 assert drills["passed"] == drills["total"], [d for d in drills["drills"] if not d["held"]]

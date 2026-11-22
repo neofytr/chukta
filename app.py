@@ -20,13 +20,15 @@ from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATE
 from chukta.drills import run_drills
 from chukta.desk import (HARD_STOPS, SandboxBank, _paise, _rupees, add_alias, approve, approve_bank_change, compute_tds, evidence_hash, connect, ingest, now, parse, pay_approved, process,
                          propose_bank_change, recheck, reject)
-from chukta.exports import audit_file, bank_file, replay_lines, tally_vouchers, verify_audit
+from chukta.close import close_payload, sign_close
+from chukta.exports import audit_file, bank_file, replay_lines, replay_story, tally_vouchers, tamper_story, verify_audit
 from chukta.investigator import ModelDown, investigate, model_chat
 from chukta.razorpay import RazorpayBank
 from chukta.reader import logged_reader
 from chukta.records import mask_text, record
-from chukta.runs import apply_instructions, close_finished_runs, create_run, interrupted_runs, latest_run, model_spend, payment_allowed, set_stage
+from chukta.runs import route_request, apply_instructions, close_finished_runs, create_run, interrupted_runs, latest_run, model_spend, payment_allowed, set_stage
 from chukta.sources import Sources
+from chukta.vendorcheck import add_checked_vendor, check_vendor
 from chukta.statement import dismiss_line, import_statement, post_lines, resolve_line, statement_payload
 
 ROOT = pathlib.Path(__file__).parent
@@ -344,6 +346,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, books_payload(db, CLIENT))
             if path == "/api/replay":
                 return self._send(200, replay_lines(db, CLIENT))
+            if path == "/api/replay/story":
+                return self._send(200, replay_story(db, CLIENT))
+            if path == "/api/close":
+                try:
+                    return self._send(200, close_payload(db, CLIENT, urllib.parse.parse_qs(parsed.query).get("period", [None])[0]))
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+            if path == "/export/close.json":
+                return self._send(200, close_payload(db, CLIENT, urllib.parse.parse_qs(parsed.query).get("period", [None])[0]), "application/json", "chukta-close-pack.json")
             if path == "/export/bank.csv":
                 return self._send(200, bank_file(db, CLIENT), "text/csv; charset=utf-8", "chukta-bank-file.csv")
             if path == "/export/tally.csv":
@@ -379,6 +390,19 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path
         if path == "/api/drills":
             return run_drills()
+        if path == "/api/route":
+            return route_request(body.get("request") or "")
+        if path == "/api/replay/tamper":
+            return tamper_story(db, CLIENT)
+        if path == "/api/vendor/check":
+            return check_vendor(db, Sources(db, f"vendor-check-{int(time.time())}", credit_limit=2.5, time_limit_s=60), CLIENT, body.get("name"), body.get("domain"))
+        if path == "/api/vendor/add":
+            if JOB["running"]:
+                raise ValueError("Chukta is working. Try again when it finishes.")
+            add_checked_vendor(db, CLIENT, str(body.get("name") or ""), body.get("domain"), str(body.get("gstin") or ""), str(body.get("account") or ""), str(body.get("ifsc") or ""), str(body.get("tds_class") or ""))
+            return {"ok": True}
+        if path == "/api/close/sign":
+            return sign_close(db, CLIENT, str(body.get("period") or ""), str(body.get("by") or "")[:80])
         if path == "/api/run":
             if JOB["running"]:
                 raise ValueError("Chukta is already working")

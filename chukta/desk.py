@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS investigations(invoice_id INTEGER PRIMARY KEY, eviden
     action TEXT NOT NULL, action_text TEXT NOT NULL, citations TEXT NOT NULL, callback TEXT, author TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pay_runs(id INTEGER PRIMARY KEY, started_by TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS closes(client_id TEXT NOT NULL, period TEXT NOT NULL, signed_by TEXT NOT NULL, pack_hash TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(client_id, period));
 CREATE TABLE IF NOT EXISTS vendor_changes(id INTEGER PRIMARY KEY, client_id TEXT NOT NULL, gstin TEXT NOT NULL, invoice_id INTEGER NOT NULL, old_account TEXT NOT NULL,
     old_ifsc TEXT NOT NULL, new_account TEXT NOT NULL, new_ifsc TEXT NOT NULL, proposed_by TEXT NOT NULL, callback_note TEXT NOT NULL, proposed_at TEXT NOT NULL,
     approved_by TEXT, approved_at TEXT, status TEXT NOT NULL DEFAULT 'PENDING');

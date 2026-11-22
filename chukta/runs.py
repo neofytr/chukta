@@ -47,6 +47,20 @@ def understand(request, invoice_count):
             "steps": [label for label, _ in WANTS], "notes": notes}
 
 
+def route_request(text):
+    """Sends a request in a customer's words to the right job. Fixed rules, so it cannot be talked out of a control."""
+    t = f" {' '.join(str(text).lower().split())} "
+    site = re.search(r"\b(?:https?://)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})\b", t)
+    if any(w in t for w in ("bank statement", "statement line", "bank line", "bank entries", "post these", "post the lines")):
+        return {"job": "bank"}
+    if re.search(r"\b(month[- ]end|monthly close|close (the |my |our )?(books|month)|close (of )?(january|february|march|april|may|june|july|august|september|october|november|december))\b", t):
+        return {"job": "close"}
+    if re.search(r"\b(new vendor|new supplier|onboard|is this vendor|vendor check|real,? trading|real business)\b", t) or (site and re.search(r"\b(vendor|supplier)\b", t) and "invoice" not in t):
+        named = re.search(r"(?:vendor|supplier)[^:\n]*:\s*([^,\n]+?)\s*,", t)
+        return {"job": "vendor", "domain": site.group(1) if site else "", "name": named.group(1).strip().title() if named else ""}
+    return {"job": "pay"}
+
+
 def create_run(db, client_id, request, texts):
     plan = understand(request, len(texts))
     run_id = f"run-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"

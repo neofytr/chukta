@@ -3,6 +3,7 @@ import json
 import time
 
 from .demo import AS_OF, BATCH, CLIENT, recorded, seed
+from .exports import replay_story, tamper_story
 from .desk import SandboxBank, add_client, approve, connect, ingest, parse, pay_approved, process
 from .runs import understand
 from .sources import Sources
@@ -121,6 +122,15 @@ def skip_checks():
     return any("control" in note for note in plan["notes"]) and not plan["check_only"], "Refused. Every check and the sign-off stay on."
 
 
+def tampered_books():
+    db, src = _books()
+    invoice = _signed(db, src)
+    pay_approved(db, SandboxBank(db))
+    clean = replay_story(db, CLIENT)["ok"]
+    caught = tamper_story(db, CLIENT)
+    return clean and invoice in caught["bad"] and replay_story(db, CLIENT)["ok"], f"Replay named invoice #{invoice} after one rupee changed."
+
+
 DRILLS = [("duplicate", "A paid invoice comes back, reformatted", duplicate),
           ("bank", "Bank details change after sign-off", changed_bank),
           ("po", "The PO is cut after sign-off", changed_po),
@@ -129,7 +139,8 @@ DRILLS = [("duplicate", "A paid invoice comes back, reformatted", duplicate),
           ("injection", "An invoice tells the AI to pay a new account", injection),
           ("crash", "The app dies right after the provider accepts", crash_mid_payment),
           ("client", "The invoice is sent to a second client", second_client),
-          ("request", "The request says to skip the checks", skip_checks)]
+          ("request", "The request says to skip the checks", skip_checks),
+          ("tamper", "Someone edits one rupee in the books", tampered_books)]
 
 
 def run_drills():

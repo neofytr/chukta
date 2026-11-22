@@ -24,12 +24,12 @@ const STATES = { BLOCKED: ["Blocked", "shieldx"], HELD: ["Held", "warn"], READY:
 const STATUS = { pass: ["Verified", "check"], fail: ["Failed", "x"], unverified: ["Can't verify", "info"], info: ["Note", "info"], POSTED: ["Posted", "check"], HELD: ["Held", "warn"], REJECTED: ["Dismissed", "x"] };
 const SHAPE_OF = { READY: "circle", HELD: "soft", BLOCKED: "burst", APPROVED: "clover", PAID: "cookie", REJECTED: "circle", NEW: "soft" };
 const SEEDS = { bay: ["#0061a3", "#d4e3ff", "#b7c7e4"], forest: ["#196b47", "#beedd2", "#adcebb"], peony: ["#993f65", "#ffd8e5", "#e3bcc9"], marigold: ["#7c5816", "#ffddb2", "#d8c3a9"] };
-const NAV = [["today", "Today", "today"], ["review", "Review", "inbox"], ["bank", "Bank", "bank"], ["books", "Books", "books"], ["audit", "Audit", "shield"]];
+const NAV = [["today", "Today", "today"], ["review", "Review", "inbox"], ["vendors", "Vendors", "building"], ["close", "Close", "signed"], ["audit", "Audit", "shield"]];
 const FILTERS = { needs: ["Needs you", ["BLOCKED", "HELD"]], ready: ["Ready", ["READY", "APPROVED"]], issued: ["Issued", ["PAID"]], all: ["All", Object.keys(STATES)] };
 const GROUPS = [["Needs your decision", ["BLOCKED", "HELD"]], ["Ready to sign", ["READY"]], ["Signed, waiting to issue", ["APPROVED"]], ["Payment requests issued", ["PAID"]], ["Rejected", ["REJECTED"]], ["Checking", ["NEW"]]];
 
 let S = null, route = ["today"], filter = "needs", sigs = {}, composerOpen = false, useSample = true, draft = null, pollTimer = null, online = true;
-let mounted = "", busyMorph = null, railRefs = null, current = null, drawerKind = null, pending = null, bankDraft = "", booksKind = "vendors", startedExceptions = 0, planOpen = false, drillResult = null, drillBusy = false, listAnim = false, stepRun = "", celebrated = "", lastMessage = "";
+let mounted = "", busyMorph = null, railRefs = null, current = null, drawerKind = null, pending = null, bankDraft = "", booksKind = "vendors", startedExceptions = 0, planOpen = false, drillResult = null, drillBusy = false, listAnim = false, vendorForm = { name: "", domain: "" }, vendorResult = null, vendorBusy = false, vendorAuto = false, closePeriod = null, replayAt = 0, replayBusy = false, replayToken = 0, replayTampered = null, stepRun = "", celebrated = "", lastMessage = "";
 const rollMemory = {}, doneSteps = new Set(), seenLive = new Set();
 const hiddenIds = new Set();
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
@@ -231,10 +231,13 @@ function onRoute() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   route = parts.length ? parts : ["today"];
   if (route[0] === "ledger") route = ["audit", "ledger"];
+  if (route[0] === "bank") route = ["close", "bank"];
+  if (route[0] === "books") route = ["vendors", "books"];
+  if (route[0] === "audit" && route[1] !== "replay") { replayToken++; replayBusy = false; }
   if (!NAV.some(n => n[0] === route[0])) route = ["today"];
   drawerKind = null;
   sigs.detail = "";
-  if (before[0] !== route[0] || route[0] === "audit") { sigs.view = ""; sigs.list = ""; }
+  if (before[0] !== route[0] || ["audit", "vendors", "close"].includes(route[0])) { sigs.view = ""; sigs.list = ""; }
   if (!S) return;
   renderRail();
   const apply = () => { const done = renderView(); renderDock(); return done; };
@@ -283,46 +286,6 @@ function morphing(el) {
   return el;
 }
 const tile = (ic, title, text, end) => h("div", { class: "tile" }, h("span", { class: "sh", style: { clipPath: shapeFor(title) } }, icon(ic, 22)), h("div", {}, h("b", {}, title), h("div", { class: "body-s" }, text)), end || "");
-function composer() {
-  if (draft === null) draft = S.sample_request;
-  const pasted = h("textarea", { class: "input mono", id: "pasteText", rows: 6, "aria-label": "Invoice text", placeholder: "Paste invoices or emails. Put a line with only --- between them. Fictional data only." });
-  const box = h("div", { hidden: useSample }, pasted);
-  const sampleChip = h("button", { class: "chip", "aria-pressed": String(useSample), onclick: () => choose(true) }, icon("receipt", 18), `This week's ${S.sample_count} invoices`);
-  const pasteChip = h("button", { class: "chip", "aria-pressed": String(!useSample), onclick: () => choose(false) }, icon("paste", 18), "Paste");
-  function choose(sample) { useSample = sample; sampleChip.setAttribute("aria-pressed", String(sample)); pasteChip.setAttribute("aria-pressed", String(!sample)); box.hidden = sample; if (!sample) pasted.focus(); }
-  async function addFiles(files) {
-    const texts = [];
-    for (const f of files) {
-      if (f.size > 30000 || !(/\.(txt|eml)$/i.test(f.name) || f.type.startsWith("text/"))) { snack(`${f.name} isn't a small text or email file. Paste its text instead.`); continue; }
-      texts.push((await f.text()).trim());
-    }
-    if (!texts.length) return;
-    pasted.value = [pasted.value.trim(), ...texts].filter(Boolean).join("\n---\n");
-    choose(false); snack(`${plural(texts.length, "file")} added`);
-  }
-  const file = h("input", { type: "file", class: "sr", multiple: true, accept: ".txt,.eml,text/plain", "aria-label": "Add invoice files", onchange: e => { addFiles(e.target.files); e.target.value = ""; } });
-  const attach = h("label", { class: "chip", style: { cursor: "pointer" } }, icon("attach", 18), "Add files", file);
-  const ask = h("textarea", { class: "ask", "aria-label": "What should Chukta do?", rows: 4, placeholder: "What do you need done?", oninput: e => { draft = e.target.value; } });
-  ask.value = draft;
-  const start = h("button", { class: "btn filled lg run-btn", onclick: async () => {
-    try {
-      await post("/api/run", { request: ask.value, ...(useSample ? { sample: true } : { text: pasted.value }) });
-      composerOpen = false; sigs.view = ""; await tick();
-    } catch (e) { snack(e.message); }
-  } }, icon("play", 26), "Run");
-  const card = h("section", { class: "ask-card", "aria-label": "New request" }, ask, box, h("div", { class: "ask-foot" }, h("div", { class: "chips" }, sampleChip, pasteChip, attach), start));
-  card.addEventListener("dragover", e => { e.preventDefault(); card.classList.add("drop"); });
-  card.addEventListener("dragleave", () => card.classList.remove("drop"));
-  card.addEventListener("drop", e => { e.preventDefault(); card.classList.remove("drop"); addFiles(e.dataTransfer.files); });
-  const records = h("div", { class: "group" }, tile("books", "Vendor master", "Loading"));
-  get("/api/books").then(b => records.replaceChildren(
-    tile("books", "Vendor master", plural(b.vendors.length, "vendor")),
-    tile("cart", "Purchase orders", `${b.pos} open`),
-    tile("receipt", "GSTR-2B", b.periods.map(human).join(", ") || "None imported"),
-    tile("pay", "Payments", S.provider))).catch(() => {});
-  return h("div", { class: "page" }, appbar(shortClient(), [h("span", { class: "note-pill" }, "Fictional client"), providerPill()]),
-    h("div", { class: "today-grid" }, card, h("aside", {}, h("div", { class: "sec" }, "Checks against"), records)));
-}
 function invoiceRow(i) {
   const open = ["BLOCKED", "HELD"].includes(i.state);
   const sub = open && i.check ? problem(i.check) : i.due ? `MSME: pay by ${day(i.due)}` : `${i.number} · ${day(i.date)}`;
@@ -345,7 +308,7 @@ function heroCard(busy) {
   if (c.PAID && !count) return h("section", { class: "hero " + (ex ? "" : "good") }, shaped("stamp", "cookie", icon("check", 34)),
     h("div", { class: "kicker" }, "Payment requests issued"), money(S.issued, "hero"), h("div", { class: "sub" }, `${plural(c.PAID, "invoice")}, each issued once in ${S.provider}`), bar,
     h("div", { class: "actions" }, h("a", { class: "btn filled", href: "#/audit" }, icon("receipt", 20), "Open run sheet"), review));
-  if (count) return h("section", { class: "hero" }, h("div", { class: "kicker" }, c.READY ? "Ready to sign" : "Signed, ready to issue"), money(S.payment_run.net, "hero"),
+  if (count) return h("section", { class: "hero" }, h("span", { class: "hero-art" }, art("invoices")), h("div", { class: "kicker" }, c.READY ? "Ready to sign" : "Signed, ready to issue"), money(S.payment_run.net, "hero"),
     h("div", { class: "sub" }, `${plural(count, "invoice")}, net of TDS`), bar, h("div", { class: "actions" }, h("button", { class: "btn filled", onclick: openSign }, icon("draw", 20), c.READY ? "Review and sign" : "Issue payments"), review));
   return h("section", { class: "hero quiet" }, h("div", { class: "kicker" }, ex ? `${plural(ex, "invoice")} need you` : "Nothing is waiting"), h("div", { class: "sub" }, ex ? "Nothing can be signed until you decide." : "Start a new run when you're ready."), bar, h("div", { class: "actions" }, review));
 }
@@ -693,7 +656,7 @@ function holdButton(label, onDone) {
 /* Bank */
 async function renderBank() {
   const data = await get("/api/statement").catch(() => null);
-  if (!data || route[0] !== "bank") return;
+  if (!data || route[1] !== "bank") return;
   const key = "bank" + JSON.stringify([data.lines, S.job.running]);
   if (sigs.view === key || document.activeElement?.id === "stmt" || document.activeElement?.closest?.(".resolve")) return;
   sigs.view = key;
@@ -701,7 +664,7 @@ async function renderBank() {
   text.value = bankDraft;
   const send = async body => { try { await post("/api/statement", body); bankDraft = ""; sigs.view = ""; await tick(); } catch (e) { snack(e.message); } };
   mount("bank", h("div", { class: "page" },
-    appbar("Bank", [h("span", { class: "note-pill" }, icon("check", 16), `${data.posted} posted`), h("span", { class: "note-pill" }, icon("warn", 16), `${data.held} held`)], shortClient()),
+    appbar("Month end", [h("span", { class: "note-pill" }, icon("check", 16), `${data.posted} posted`), h("span", { class: "note-pill" }, icon("warn", 16), `${data.held} held`)], shortClient()), closeTabs(),
     h("section", { class: "card" }, h("h2", { class: "title", style: { marginBottom: "4px" } }, "Post statement lines"),
       h("p", { class: "body-s", style: { marginBottom: "14px" } }, "A third of the Indian company names we sampled are shared, so a name alone never posts a line. It needs a payment Chukta issued, or a firm rule confirmed against the company's record."),
       text, h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: S.job.running, onclick: () => send({ text: document.getElementById("stmt").value }) }, icon("play", 18), "Post lines"),
@@ -729,7 +692,7 @@ const BOOKS_HELP = {
 };
 async function renderBooks() {
   const d = await get("/api/books").catch(() => null);
-  if (!d || route[0] !== "books") return;
+  if (!d || route[1] !== "books") return;
   const key = "books" + JSON.stringify([d, booksKind]);
   if (sigs.view === key || document.activeElement?.id === "booksText") return;
   sigs.view = key;
@@ -737,7 +700,7 @@ async function renderBooks() {
   const text = h("textarea", { class: "input mono", id: "booksText", rows: 5, "aria-label": `${title} data`, placeholder: format });
   const send = async () => { try { const r = await post(path, { text: text.value }); snack(ok(r.result)); text.value = ""; sigs.view = ""; await tick(); } catch (e) { snack(e.message); } };
   mount("books", h("div", { class: "page" },
-    appbar("Books", null, shortClient()),
+    appbar("Vendors", null, shortClient()), vendorTabs(),
     h("section", { class: "stat-row", "aria-label": "Books" }, stat("Vendors", String(d.vendors.length), "On the master"), stat("Purchase orders", String(d.pos), "Open to match"), stat("GSTR-2B periods", String(d.periods.length), d.periods.map(human).join(", ") || "None imported"), stat("Bank changes", String(d.changes.length), "Two-person approval")),
     h("section", { class: "card" }, h("h2", { class: "title", style: { marginBottom: "10px" } }, "Bring in records"),
       h("div", { class: "chips", role: "group", "aria-label": "Record type", style: { marginBottom: "12px" } }, Object.entries(BOOKS_HELP).map(([k, v]) => h("button", { class: "chip", "aria-pressed": String(booksKind === k), onclick: () => { booksKind = k; sigs.view = ""; renderBooks(); } }, v[0]))),
@@ -748,7 +711,7 @@ async function renderBooks() {
 }
 
 /* Audit: the finished work, the attacks, and the ledger */
-const auditTabs = () => h("nav", { class: "tabs", "aria-label": "Audit views" }, [["", "Run sheet"], ["drills", "Break it"], ["ledger", "Ledger"]].map(([id, label]) =>
+const auditTabs = () => h("nav", { class: "tabs", "aria-label": "Audit views" }, [["", "Run sheet"], ["replay", "Replay"], ["drills", "Break it"], ["ledger", "Ledger"]].map(([id, label]) =>
   h("a", { href: "#/audit" + (id ? "/" + id : ""), "aria-current": (route[1] || "") === id ? "page" : null }, label)));
 const auditPage = (kind, ...body) => mount("audit-" + kind, h("div", { class: "page" }, appbar("Audit", null, shortClient()), auditTabs(), ...body));
 const exportRow = (href, ic, title, text) => h("a", { class: "export", href, download: "" }, h("span", { class: "sh", style: { clipPath: shapeFor(title) } }, icon(ic, 22)), h("span", {}, h("b", {}, title), h("span", { class: "body-s" }, text)), icon("download", 22));
@@ -761,6 +724,7 @@ const requestText = r => String(r).replace("/company/identify", "Company lookup"
 async function renderAudit() {
   if (route[1] === "ledger") return renderLedger();
   if (route[1] === "drills") return renderDrills();
+  if (route[1] === "replay") return renderReplay();
   const d = await get("/api/replay").catch(() => null);
   if (!d || route[0] !== "audit" || route[1]) return;
   const open = S.invoices.filter(i => ["BLOCKED", "HELD"].includes(i.state));
@@ -800,7 +764,7 @@ function renderDrills() {
     h("section", { class: "hero " + (r && r.passed === r.total ? "good" : r ? "" : "quiet"), style: { marginBottom: "12px" } },
       r && r.passed === r.total ? shaped("stamp", "cookie", icon("verified", 34)) : null,
       h("div", { class: "kicker" }, r ? "Attacks stopped" : "Try to break it"),
-      r ? h("div", { class: "amount" }, `${r.passed} of ${r.total}`) : h("div", { class: "headline", style: { margin: "4px 0" } }, "Nine ways this could lose a client's money"),
+      r ? h("div", { class: "amount" }, `${r.passed} of ${r.total}`) : h("div", { class: "headline", style: { margin: "4px 0" } }, "Ten ways this could lose a client's money"),
       h("div", { class: "sub", style: { maxWidth: "620px" } }, "Runs the real decision and payment code on a private copy of the sample books. Your books, credits and Razorpay are not touched."),
       h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: drillBusy, onclick: run }, icon("play", 22), drillBusy ? "Running" : r ? "Run again" : "Run all attacks"))),
     r ? h("div", { class: "group" }, r.drills.map((x, i) => h("div", { class: "drill" + (x.held ? "" : " bad"), style: { animationDelay: `${i * 80}ms` } },
@@ -826,6 +790,219 @@ async function renderLedger() {
       h("div", { class: "table-wrap" }, h("table", { class: "table" }, h("thead", {}, h("tr", {}, ["When", "Source", "What", "Result", "Credits", "Model $"].map((x, i) => h("th", { class: i > 3 ? "r" : "", scope: "col" }, x)))),
         h("tbody", {}, d.calls.slice(0, 60).map(c => h("tr", {}, h("td", { style: { whiteSpace: "nowrap" } }, stamp(c.at)), h("td", {}, SOURCE_NAMES[c.source] || c.source), h("td", {}, requestText(c.request)), h("td", {}, outcomeText(c.outcome)), h("td", { class: "r" }, c.credits ? String(c.credits) : "0"), h("td", { class: "r" }, c.usd ? c.usd.toFixed(5) : "0")))))))]
       : h("section", { class: "card" }, h("div", { class: "empty", style: { minHeight: "240px" } }, shaped("sh", "soft", icon("receipt", 40)), h("div", { class: "title" }, "No calls yet"), h("p", { class: "body-s" }, "Every source call and its cost will appear here."))));
+}
+
+/* Illustrations: drawn here, in the palette of whichever theme is on */
+const blob = (kind, cx, cy, r, cls, spin = 0) => {
+  const radius = POLAR[kind] || POLAR.circle, rs = Array.from({ length: 72 }, (_, i) => radius(i / 72 * Math.PI * 2)), max = Math.max(...rs);
+  return `<polygon class="${cls}" points="${rs.map((v, i) => { const a = i / 72 * Math.PI * 2 + spin, l = v / max * r; return `${(cx + l * Math.cos(a)).toFixed(1)},${(cy + l * Math.sin(a)).toFixed(1)}`; }).join(" ")}"/>`;
+};
+const paper = (x, y, w, h, deg, cls, lines = 4) => `<g transform="rotate(${deg} ${x + w / 2} ${y + h / 2})"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="7" class="${cls}"/>${Array.from({ length: lines }, (_, i) => `<rect x="${x + 10}" y="${y + 15 + i * 12}" width="${(w - 20) * (i % 2 ? .62 : .88)}" height="4" rx="2" class="a-line"/>`).join("")}</g>`;
+const squiggle = (x, y, w, cls) => `<path class="a-sq ${cls}" d="M${x} ${y} q${w / 8} -9 ${w / 4} 0 t${w / 4} 0 t${w / 4} 0 t${w / 4} 0"/>`;
+const tickMark = (cx, cy, s, cls = "a-on") => `<path class="a-tick ${cls}" d="M${cx - s} ${cy} l${s * .7} ${s * .7} l${s * 1.3} -${s * 1.4}"/>`;
+const ART = {
+  invoices: () => blob("cookie", 104, 78, 66, "a-tint") + paper(46, 34, 62, 82, -13, "a-paper2") + paper(100, 30, 62, 82, 11, "a-paper2") + paper(70, 24, 66, 92, -2, "a-paper") + blob("sunny", 134, 102, 23, "a-p") + tickMark(134, 102, 9) + blob("clover", 38, 34, 9, "a-t") + blob("gem", 170, 42, 7, "a-w") + squiggle(20, 128, 46, "a-sp"),
+  bank: () => blob("flower", 100, 78, 66, "a-tint") + `<path class="a-p" d="M100 22 158 54H42z"/><rect x="46" y="54" width="108" height="7" class="a-t"/>` + [56, 82, 108, 134].map(x => `<rect x="${x}" y="64" width="11" height="42" rx="3" class="a-paper"/>`).join("") + `<rect x="40" y="106" width="120" height="9" rx="3" class="a-p"/><circle cx="154" cy="112" r="20" class="a-w"/><text x="154" y="119" text-anchor="middle" class="a-rupee">₹</text>` + blob("gem", 34, 40, 8, "a-t") + squiggle(24, 132, 58, "a-sp"),
+  vendor: () => blob("puffy", 98, 80, 66, "a-tint") + `<rect x="46" y="52" width="104" height="66" rx="6" class="a-paper"/><path class="a-t" d="M42 32h112l10 24H32z"/>` + [0, 1, 2, 3, 4].map(n => `<path class="${n % 2 ? "a-paper2" : "a-p"}" d="M${32 + n * 26.4} 56a13.200 13.200 0 0 0 26.400 0z"/>`).join("") + `<rect x="58" y="78" width="26" height="40" rx="3" class="a-p"/><rect x="96" y="78" width="42" height="22" rx="3" class="a-paper2"/><circle cx="150" cy="104" r="20" class="a-glass"/><path class="a-handle" d="m165 119 15 15"/>` + tickMark(150, 104, 8, "a-ink") + blob("clover", 28, 34, 8, "a-w"),
+  close: () => blob("clover", 100, 78, 68, "a-tint") + `<rect x="50" y="30" width="100" height="90" rx="12" class="a-paper"/><path class="a-p" d="M50 58V42a12 12 0 0 1 12-12h76a12 12 0 0 1 12 12v16z"/><rect x="72" y="20" width="7" height="20" rx="3.500" class="a-ink"/><rect x="121" y="20" width="7" height="20" rx="3.500" class="a-ink"/>` + Array.from({ length: 12 }, (_, i) => `<circle cx="${66 + (i % 4) * 22}" cy="${71 + Math.floor(i / 4) * 16}" r="4.500" class="${i < 9 ? "a-t" : "a-paper2"}"/>`).join("") + blob("burst", 150, 112, 24, "a-s") + tickMark(150, 112, 9) + squiggle(18, 134, 54, "a-sp"),
+  replay: () => blob("sunny", 100, 78, 66, "a-tint") + `<path class="a-paper" d="M62 18h76v104l-9.500 7-9.500-7-9.500 7-9.500-7-9.500 7-9.500-7-9.500 7-9.500-7z"/>` + [0, 1, 2, 3, 4].map(i => `<circle cx="76" cy="${38 + i * 17}" r="4.500" class="${i < 3 ? "a-t" : "a-paper2"}"/><rect x="88" y="${35 + i * 17}" width="${i % 2 ? 26 : 38}" height="5" rx="2.500" class="a-line"/>`).join("") + blob("cookie", 146, 100, 25, "a-p") + `<path class="a-on-fill" d="M139 88v24l19-12z"/>` + blob("gem", 38, 48, 8, "a-w") + squiggle(20, 128, 40, "a-sp"),
+};
+function art(name, cls = "") {
+  const t = document.createElement("template");
+  t.innerHTML = `<svg class="art ${cls}" viewBox="0 0 200 150" aria-hidden="true">${ART[name]()}</svg>`;
+  return t.content.firstElementChild;
+}
+const JOBS = [
+  { id: "pay", title: "Pay this week's invoices", note: "Check, hold, sign, issue once", art: "invoices" },
+  { id: "bank", title: "Post the bank statement", note: "Right payee, right account", art: "bank", request: "Post these bank statement lines from October 2026 to the right payee and account." },
+  { id: "vendor", title: "Check a new vendor", note: "Real, active and trading?", art: "vendor", request: "Here is a new vendor's name and website: Moglix, moglix.com. Tell me whether it is a real, trading business." },
+  { id: "close", title: "Close the month", note: "What's stopping October?", art: "close", request: "Close October for this client and tell me what is stopping it." },
+];
+const tabs = (base, items) => h("nav", { class: "tabs", "aria-label": "Views" }, items.map(([id, label]) => h("a", { href: `#/${base}${id ? "/" + id : ""}`, "aria-current": (route[1] || "") === id ? "page" : null }, label)));
+const vendorTabs = () => tabs("vendors", [["", "Check a vendor"], ["books", "The books"]]);
+const closeTabs = () => tabs("close", [["", "Month end"], ["bank", "Bank statement"]]);
+function composer() {
+  if (draft === null) draft = S.sample_request;
+  const pasted = h("textarea", { class: "input mono", id: "pasteText", rows: 5, "aria-label": "Invoice text", placeholder: "Paste invoices or emails. Put a line with only --- between them. Fictional data only." });
+  const box = h("div", { hidden: useSample }, pasted);
+  const sampleChip = h("button", { class: "chip", "aria-pressed": String(useSample), onclick: () => choose(true) }, icon("receipt", 18), `This week's ${S.sample_count}`);
+  const pasteChip = h("button", { class: "chip", "aria-pressed": String(!useSample), onclick: () => choose(false) }, icon("paste", 18), "Paste");
+  function choose(sample) { useSample = sample; sampleChip.setAttribute("aria-pressed", String(sample)); pasteChip.setAttribute("aria-pressed", String(!sample)); box.hidden = sample; if (!sample) pasted.focus(); }
+  async function addFiles(files) {
+    const texts = [];
+    for (const f of files) {
+      if (f.size > 30000 || !(/\.(txt|eml)$/i.test(f.name) || f.type.startsWith("text/"))) { snack(`${f.name} isn't a small text or email file. Paste its text instead.`); continue; }
+      texts.push((await f.text()).trim());
+    }
+    if (!texts.length) return;
+    pasted.value = [pasted.value.trim(), ...texts].filter(Boolean).join("\n---\n");
+    choose(false); snack(`${plural(texts.length, "file")} added`);
+  }
+  const file = h("input", { type: "file", class: "sr", multiple: true, accept: ".txt,.eml,text/plain", "aria-label": "Add invoice files", onchange: e => { addFiles(e.target.files); e.target.value = ""; } });
+  const attach = h("label", { class: "chip", style: { cursor: "pointer" } }, icon("attach", 18), "Add files", file);
+  const ask = h("textarea", { class: "ask", "aria-label": "What should Chukta do?", rows: 3, placeholder: "What do you need done?", oninput: e => { draft = e.target.value; mark(); } });
+  ask.value = draft;
+  const tiles = JOBS.map(j => h("button", { class: "job job-" + j.id, "aria-pressed": "false", onclick: () => { draft = j.request || S.sample_request; ask.value = draft; mark(j.id); ask.focus(); } },
+    h("span", { class: "job-art" }, art(j.art)), h("span", { class: "job-t" }, j.title), h("span", { class: "job-n" }, j.note)));
+  const chipRow = h("div", { class: "chips" }, sampleChip, pasteChip, attach);
+  async function mark(id) {
+    const job = id || (await post("/api/route", { request: ask.value }).catch(() => ({ job: "pay" }))).job;
+    tiles.forEach((t, n) => t.setAttribute("aria-pressed", String(JOBS[n].id === job)));
+    chipRow.style.visibility = job === "pay" ? "visible" : "hidden"; if (job !== "pay") box.hidden = true; else box.hidden = useSample;
+  }
+  const start = h("button", { class: "btn filled lg run-btn", onclick: async () => {
+    try {
+      const to = await post("/api/route", { request: ask.value });
+      if (to.job === "bank") { composerOpen = false; go("close", "bank"); await post("/api/statement", { sample: true }).catch(e => snack(e.message)); sigs.view = ""; await tick(); return; }
+      if (to.job === "vendor") { composerOpen = false; vendorForm = { name: to.name || "", domain: to.domain || "" }; vendorResult = null; vendorAuto = Boolean(to.name && to.domain); go("vendors"); return; }
+      if (to.job === "close") { composerOpen = false; go("close"); return; }
+      await post("/api/run", { request: ask.value, ...(useSample ? { sample: true } : { text: pasted.value }) });
+      composerOpen = false; sigs.view = ""; await tick();
+    } catch (e) { snack(e.message); }
+  } }, icon("play", 26), "Run");
+  const card = h("section", { class: "ask-card", "aria-label": "New request" }, h("label", { class: "ask-label", for: "askBox" }, "What do you need done?"), ask, box, h("div", { class: "ask-foot" }, chipRow, start));
+  ask.id = "askBox";
+  card.addEventListener("dragover", e => { e.preventDefault(); card.classList.add("drop"); });
+  card.addEventListener("dragleave", () => card.classList.remove("drop"));
+  card.addEventListener("drop", e => { e.preventDefault(); card.classList.remove("drop"); addFiles(e.dataTransfer.files); });
+  const records = h("div", { class: "records" });
+  get("/api/books").then(b => records.replaceChildren(h("span", {}, "Checked against"), ...[plural(b.vendors.length, "vendor"), plural(b.pos, "purchase order"), `GSTR-2B ${b.periods.map(human).join(", ") || "not imported"}`, "Crustdata", "IFSC registry"].map(x => h("b", {}, x)))).catch(() => {});
+  mark();
+  return h("div", { class: "page" }, appbar(shortClient(), [h("span", { class: "note-pill" }, "Fictional client"), providerPill()]), card, h("section", { class: "jobs", "aria-label": "Jobs Chukta can do" }, tiles), records);
+}
+
+/* Vendors */
+function spark(values) {
+  const w = 320, h2 = 84, min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
+  const pts = values.map((v, i) => [i / (values.length - 1) * w, h2 - 10 - (v - min) / span * (h2 - 22)]);
+  let d = `M${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length; i++) { const [a, b] = pts[i - 1], [c, e] = pts[i], m = (a + c) / 2; d += ` C${m} ${b} ${m} ${e} ${c} ${e}`; }
+  const svg = svgEl("svg", { class: "spark", viewBox: `0 0 ${w} ${h2}`, preserveAspectRatio: "none", role: "img", "aria-label": `Headcount from ${values[0]} to ${values[values.length - 1]} over the last year` });
+  svg.append(svgEl("path", { class: "sp-a", d: `${d} L${w} ${h2} L0 ${h2} Z` }), svgEl("path", { class: "sp-l", d }));
+  return svg;
+}
+const VERDICT = { REAL: ["verified", "cookie", "good"], LOOK: ["maybe", "gem", "look"], STOP: ["shieldx", "burst", "stop"] };
+async function runVendor(name, domain) {
+  vendorForm = { name, domain }; vendorBusy = true; vendorResult = null; document.activeElement?.blur?.(); sigs.view = ""; renderVendors();
+  try { vendorResult = await post("/api/vendor/check", { name, domain }); } catch (e) { snack(e.message); }
+  vendorBusy = false; sigs.view = ""; renderVendors();
+  document.querySelector(".v-grid")?.scrollIntoView({ behavior: reduced.matches ? "auto" : "smooth", block: "start" });
+  if (vendorResult?.verdict === "REAL") setTimeout(() => celebrate(document.querySelector(".v-seal")), 160);
+}
+function renderVendors() {
+  if (vendorAuto) { vendorAuto = false; runVendor(vendorForm.name, vendorForm.domain); return; }
+  const key = "vendors" + JSON.stringify([vendorResult, vendorBusy]);
+  if (sigs.view === key || document.activeElement?.matches?.(".vform input")) return; sigs.view = key;
+  const name = h("input", { class: "input", id: "vName", placeholder: "Acme Tools Private Limited", value: vendorForm.name, autocomplete: "off" }), site = h("input", { class: "input", id: "vSite", placeholder: "acmetools.in", value: vendorForm.domain, autocomplete: "off" });
+  const form = h("form", { class: "vform", onsubmit: e => { e.preventDefault(); runVendor(name.value, site.value); } },
+    h("div", { class: "v-intro" }, h("h2", { class: "headline" }, "Is this vendor real?"), h("p", { class: "body-s" }, "Live company records, before the first rupee moves.")),
+    h("div", { class: "form-row" }, h("label", { class: "field" }, h("span", {}, "Vendor name"), name), h("label", { class: "field" }, h("span", {}, "Website"), site)),
+    h("div", { class: "actions" }, h("button", { class: "btn filled", type: "submit", disabled: vendorBusy }, icon("agent", 20), vendorBusy ? "Checking" : "Check vendor"),
+      h("button", { class: "chip", type: "button", onclick: () => runVendor("Moglix", "moglix.com") }, "Try a real one"), h("button", { class: "chip", type: "button", onclick: () => runVendor("Moglix", "mogllx.com") }, "Try a lookalike"), h("button", { class: "chip", type: "button", onclick: () => runVendor("Sharma Traders", "sharma-traders-pilani.test") }, "Try an unknown")),
+    h("span", { class: "v-art" }, art("vendor")));
+  const r = vendorResult;
+  let body = null;
+  if (vendorBusy) body = h("section", { class: "live" }, morphing(shaped("morph", "soft", icon("agent", 32))), h("h2", { class: "headline" }, `Looking up ${vendorForm.domain}`));
+  if (r) {
+    const [ic, sh, tone] = VERDICT[r.verdict], f = r.facts;
+    const facts = f ? [["Founded", f.year_founded], ["People", f.employees?.toLocaleString("en-IN")], ["Based in", typeof f.hq === "string" ? f.hq : f.country], ["Type", f.type], ["Status", f.status], ["Record as of", f.as_of ? day(f.as_of) : null]] : [];
+    const add = !r.on_master && r.verdict !== "STOP" ? addVendorForm(r) : null;
+    body = h("div", { class: "v-grid" },
+      h("div", {}, h("section", { class: "v-verdict " + tone }, shaped("v-seal", sh, icon(ic, 34, true)), h("div", {}, h("div", { class: "kicker" }, r.name + " · " + r.domain), h("h2", { class: "headline" }, r.headline))),
+        f ? h("section", { class: "fact-grid" }, facts.map(([a, b]) => h("div", {}, h("span", {}, a), h("b", {}, b ?? "Not on record")))) : null,
+        h("div", { class: "sec" }, "Evidence", h("span", {}, `Retrieved ${day(r.retrieved)}`)),
+        h("div", { class: "group" }, r.findings.map(x => h("div", { class: "li static" }, h("span", { class: "sh " + x.status, style: { clipPath: shape(STATUS_SHAPE[x.status] || "soft") } }, icon((STATUS[x.status] || [])[1] || "info", 20)), h("span", {}, h("strong", {}, x.detail), h("span", { class: "src" }, `${(STATUS[x.status] || [x.status])[0]} · ${x.source.startsWith("crustdata:") ? "Crustdata, " + x.source.split(" ")[1] : "Vendor master"} · ${day(x.retrieved)}`)), "")))),
+      h("aside", {}, f?.trend?.length > 2 ? h("section", { class: "card trend" }, h("div", { class: "title-s" }, "Headcount, last year"), h("div", { class: "trend-n" }, f.employees?.toLocaleString("en-IN")), spark(f.trend), h("div", { class: "body-s" }, "Crustdata, headcount.timeseries")) : null, add));
+  }
+  mount("vendors", h("div", { class: "page" }, appbar("Vendors", null, shortClient()), vendorTabs(), form, body));
+}
+function addVendorForm(r) {
+  const gstin = h("input", { class: "input", placeholder: "GSTIN", "aria-label": "GSTIN" }), account = h("input", { class: "input", placeholder: "Bank account", "aria-label": "Bank account", inputmode: "numeric" }), ifsc = h("input", { class: "input", placeholder: "IFSC", "aria-label": "IFSC" });
+  const kind = h("select", { class: "input", "aria-label": "TDS category" }, [["goods", "Goods"], ["contractor", "Contractor"], ["professional", "Professional"], ["technical", "Technical"]].map(([v, t]) => h("option", { value: v }, t)));
+  return h("form", { class: "card add-v", onsubmit: async e => { e.preventDefault(); if (await act("/api/vendor/add", { name: r.name, domain: r.domain, gstin: gstin.value, account: account.value, ifsc: ifsc.value, tds_class: kind.value }, `${r.name} added to the vendor master.`)) { vendorResult = { ...r, on_master: true }; sigs.view = ""; renderVendors(); } } },
+    h("div", { class: "title-s" }, "Add to vendor master"), h("p", { class: "body-s" }, "Your name goes on it. Bank details can only change later through the two-person flow."), gstin, account, ifsc, kind, h("button", { class: "btn tonal", type: "submit" }, icon("plus", 20), "Add vendor"));
+}
+
+/* Month end */
+async function renderClose() {
+  const d = await get(`/api/close${closePeriod ? `?period=${closePeriod}` : ""}`).catch(() => null);
+  if (!d || route[0] !== "close" || route[1]) return;
+  const key = "close" + JSON.stringify(d);
+  if (sigs.view === key) return; sigs.view = key;
+  const month = human(d.period), left = d.checks.length - d.done, C = 2 * Math.PI * 46;
+  const ring = svgEl("svg", { class: "ring", viewBox: "0 0 108 108", "aria-hidden": "true" });
+  ring.append(svgEl("circle", { cx: 54, cy: 54, r: 46, class: "r-bg" }), svgEl("circle", { cx: 54, cy: 54, r: 46, class: "r-fg", style: `--c:${C};--o:${C * (1 - d.done / d.checks.length)}` }));
+  const signClose = async () => { const by = await askReviewer(); if (!by) { hold.disabled = false; return; } try { await post("/api/close/sign", { by, period: d.period }); sigs.view = ""; await renderClose(); setTimeout(() => celebrate(document.querySelector(".close-hero .rubber")), 100); } catch (e) { snack(e.message); } };
+  const hold = d.ready && !d.closed ? holdButton(`Close ${month}`, signClose) : null;
+  const maxAge = Math.max(1, ...d.ageing.map(a => a.paise));
+  mount("close", h("div", { class: "page" }, appbar("Month end", d.periods.length > 1 ? d.periods.map(p => h("button", { class: "chip", "aria-pressed": String(p === d.period), onclick: () => { closePeriod = p; sigs.view = ""; renderClose(); } }, human(p))) : null, shortClient()), closeTabs(),
+    h("section", { class: "hero close-hero " + (d.closed || d.ready ? "good" : "") },
+      h("div", { class: "ring-wrap" }, ring, h("div", { class: "ring-n" }, h("b", {}, String(d.done)), `of ${d.checks.length}`)),
+      h("div", { class: "close-copy" }, h("div", { class: "kicker" }, `${month} close`), h("h2", { class: "display" }, d.closed ? "Books closed" : d.ready ? "Ready to close" : `${plural(left, "thing")} in the way`),
+        h("p", { class: "sub" }, d.closed ? (d.closed.changed ? "The books changed after this close was signed." : `Signed by ${d.closed.by}. The pack is fingerprinted.`) : d.ready ? "A person signs the close." : "Clear these and the month can be signed."),
+        h("div", { class: "actions" }, h("a", { class: "btn tonal", href: `/export/close.json?period=${d.period}`, download: "" }, icon("download", 20), "Close pack"))),
+      hold ? h("div", { class: "hold-wrap close-hold" }, hold, h("div", { class: "hold-label" }, "Hold to close")) : d.closed ? h("div", { class: "rubber" }, "Closed") : h("span", { class: "close-art" }, art("close"))),
+    h("div", { class: "today-grid", style: { marginTop: "12px" } },
+      h("div", {}, h("div", { class: "sec" }, "Close checklist", h("span", {}, `${d.done} of ${d.checks.length}`)), h("div", { class: "group" }, d.checks.map(c => h("a", { class: "li close-item", href: c.link },
+        h("span", { class: "sh " + (c.ok ? "pass" : "unverified"), style: { clipPath: shape(c.ok ? "sunny" : "gem") } }, icon(c.ok ? "check" : "warn", 20)), h("span", {}, h("strong", {}, c.title), h("span", { class: "what" }, human(c.detail))), icon("chevron", 20))))),
+      h("aside", {}, h("div", { class: "sec" }, "The month in rupees"), h("section", { class: "card" }, [["Invoiced", d.totals.invoiced], ["Issued", d.totals.issued], ["TDS deducted", d.totals.tds], ["GST retained", d.totals.retained], ["Held as duplicates", d.totals.duplicates], ["Still owed", d.totals.outstanding]].map(([a, b]) => h("div", { class: "kv" }, h("span", {}, a), h("b", {}, b)))),
+        h("section", { class: "card" }, h("div", { class: "title-s", style: { marginBottom: "10px" } }, "Payables by age"), d.ageing.map(a => h("div", { class: "age" }, h("div", { class: "meter-h" }, h("span", {}, a.bucket), h("b", {}, a.amount)), h("div", { class: "track" }, a.paise ? h("i", { style: { width: Math.max(2, a.paise / maxAge * 100) + "%" } }) : null)))),
+        d.tds_by_section.length ? h("section", { class: "card" }, h("div", { class: "title-s", style: { marginBottom: "8px" } }, "TDS by section (draft)"), d.tds_by_section.map(x => h("div", { class: "kv" }, h("span", {}, x.section), h("b", {}, x.amount)))) : null))));
+}
+
+/* Replay */
+const pause = ms => new Promise(r => setTimeout(r, reduced.matches ? 0 : ms));
+function replaySteps(line, animate) {
+  const box = document.getElementById("rsteps");
+  if (!box) return [];
+  box.replaceChildren(h("header", { class: "r-head" }, h("span", { class: "avw" }, h("span", { class: "av t" + hashOf(line.vendor) % 4, style: { clipPath: shapeFor(line.vendor) } }, line.vendor[0])), h("div", {}, h("div", { class: "title" }, line.vendor), h("div", { class: "body-s" }, `${line.number || "No number"} · ${line.amount} · ${(STATES[line.state] || [line.state])[0]}`))),
+    ...line.steps.map(s => h("div", { class: "rstep " + (animate ? "wait" : s.ok ? "ok" : "bad") }, h("span", { class: "rdot", style: { clipPath: shape(s.ok ? "sunny" : "burst") } }, icon(s.ok ? "check" : "x", 16)), h("span", {}, h("b", {}, s.title), h("small", {}, human(s.detail))))));
+  return [...box.querySelectorAll(".rstep")];
+}
+function pickReplay(n, data) {
+  replayAt = n;
+  document.querySelectorAll(".tape-line").forEach((l, i) => l.setAttribute("aria-current", String(i === n)));
+  document.querySelectorAll(".tape-line")[n]?.scrollIntoView({ block: "nearest", behavior: reduced.matches ? "auto" : "smooth" });
+  return replaySteps(data.lines[n], false);
+}
+async function playReplay(data, stopAtBad) {
+  const run = ++replayToken, rows = [...document.querySelectorAll(".tape-line")], status = document.getElementById("replayStatus");
+  replayBusy = true; rows.forEach(r => r.classList.remove("done", "bad"));
+  let checked = 0;
+  for (let n = 0; n < data.lines.length; n++) {
+    if (run !== replayToken || route[1] !== "replay") return;
+    replayAt = n; rows.forEach((l, i) => l.setAttribute("aria-current", String(i === n))); rows[n].scrollIntoView({ block: "nearest" });
+    const line = data.lines[n], steps = replaySteps(line, true);
+    for (let i = 0; i < steps.length; i++) {
+      await pause(stopAtBad ? 26 : 62);
+      if (run !== replayToken) return;
+      steps[i].className = "rstep " + (line.steps[i].ok ? "ok" : "bad"); checked++;
+      if (status) status.textContent = `${checked} of ${data.steps} checks replayed`;
+    }
+    rows[n].classList.add(line.ok ? "done" : "bad");
+    if (!line.ok && stopAtBad) { replayBusy = false; if (status) status.textContent = `Caught on line ${n + 1}: ${line.vendor}`; document.getElementById("rsteps").animate([{ transform: "translateX(0)" }, { transform: "translateX(-9px)" }, { transform: "translateX(8px)" }, { transform: "translateX(-5px)" }, { transform: "translateX(0)" }], { duration: 380 }); return; }
+    await pause(stopAtBad ? 30 : 110);
+  }
+  replayBusy = false;
+  if (status) status.textContent = data.ok ? `All ${data.lines.length} lines hold. ${data.steps} checks, ${data.events} chained events.` : `${data.bad.length} line${data.bad.length === 1 ? "" : "s"} failed`;
+  if (data.ok && data.lines.length) celebrate(document.querySelector(".replay-hero .art"));
+}
+async function renderReplay() {
+  if (replayBusy) return;
+  const d = replayTampered || await get("/api/replay/story").catch(() => null);
+  if (!d || route[1] !== "replay") return;
+  const key = "replay" + JSON.stringify([d, Boolean(replayTampered)]);
+  if (sigs.view === key) return; sigs.view = key;
+  const paid = d.lines.some(l => l.state === "PAID");
+  const tamper = async () => { try { replayTampered = await post("/api/replay/tamper"); sigs.view = ""; await renderReplay(); playReplay(replayTampered, true); } catch (e) { snack(e.message); } };
+  const back = () => { replayToken++; replayBusy = false; replayTampered = null; sigs.view = ""; renderReplay(); };
+  auditPage("replay",
+    h("section", { class: "hero replay-hero " + (replayTampered ? "alarm" : "") }, h("span", { class: "close-art" }, art("replay")),
+      h("div", { class: "kicker" }, replayTampered ? "A private copy, with one rupee changed" : "Replay the books"), h("h2", { class: "display" }, replayTampered ? "Find the rupee" : "Line by line"),
+      h("p", { class: "sub", id: "replayStatus" }, d.lines.length ? `${plural(d.lines.length, "line")}, ${d.steps} checks, recomputed from what was stored.` : "Nothing to replay yet."),
+      h("div", { class: "actions" }, h("button", { class: "btn filled", disabled: !d.lines.length, onclick: () => playReplay(d, Boolean(replayTampered)) }, icon("play", 22), "Play"), replayTampered ? h("button", { class: "btn tonal", onclick: back }, icon("back", 20), "Back to the real books") : h("button", { class: "btn tonal", disabled: !paid, title: paid ? "" : "Issue a payment run first", onclick: tamper }, icon("rupee", 20), "Change one rupee"))),
+    d.lines.length ? h("div", { class: "replay-grid" }, h("div", { class: "tape", role: "list" }, d.lines.map((l, n) => h("button", { class: "tape-line " + (l.ok ? "" : "bad"), role: "listitem", "aria-current": String(n === replayAt), onclick: () => { replayToken++; replayBusy = false; pickReplay(n, d); } }, h("span", { class: "tl-n" }, String(n + 1).padStart(2, "0")), h("span", { class: "tl-v" }, l.vendor, h("small", {}, l.number || "No number")), h("b", {}, l.amount), h("i", {}, icon(l.ok ? "check" : "x", 15))))), h("section", { class: "rsteps", id: "rsteps", "aria-live": "polite" })) : null);
+  if (d.lines.length) pickReplay(Math.min(replayAt, d.lines.length - 1), d);
 }
 
 /* Motion */
@@ -865,8 +1042,8 @@ function celebrate(anchor) {
 /* Loop */
 function renderView() {
   if (route[0] === "review") return renderReview();
-  if (route[0] === "bank") return renderBank();
-  if (route[0] === "books") return renderBooks();
+  if (route[0] === "vendors") return route[1] === "books" ? renderBooks() : renderVendors();
+  if (route[0] === "close") return route[1] === "bank" ? renderBank() : renderClose();
   if (route[0] === "audit") return renderAudit();
   return renderToday();
 }
