@@ -1011,7 +1011,7 @@ async function renderReplay() {
 }
 
 /* Imposter Radar */
-const RADAR = { watch: ["Can send email", "burst", "fail"], parked: ["Registered, no mail", "gem", "unverified"], known: ["Another real business", "clover", "info"], older: ["Older than the vendor", "pebble", "info"], cleared: ["Cleared by a person", "sunny", "pass"], own: ["Belongs to the vendor", "sunny", "pass"] };
+const RADAR = { watch: ["Can send email", "burst", "fail"], parked: ["Registered, no mail", "gem", "unverified"], known: ["Another real business", "clover", "info"], older: ["Long-established name", "pebble", "info"], cleared: ["Cleared by a person", "sunny", "pass"], own: ["Belongs to the vendor", "sunny", "pass"] };
 function radarScope(d, busy) {
   const blips = d.hits.map(x => {
     const n = hashOf(x.domain), angle = (n % 360) * Math.PI / 180, reach = { watch: 22, parked: 34, known: 41, older: 41, own: 45, cleared: 45 }[x.level] + (n >> 9) % 5;

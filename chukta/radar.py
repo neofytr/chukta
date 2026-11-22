@@ -19,6 +19,7 @@ OTHER_ENDINGS = ("com", "in", "co", "co.in", "net", "org", "cam", "biz", "info",
 RESERVED = ("test", "example", "invalid", "localhost")
 PER_VENDOR = 26
 NEW_DAYS = 365
+SETTLED_DAYS = 3 * 365  # A name held this long was not registered for this week's fraud.
 
 
 def lookalikes(domain, limit=PER_VENDOR):
@@ -66,8 +67,14 @@ def probe(name, fetch=http_call):
 
 
 def registered_on(name, fetch=http_call):
+    base = {"com": "https://rdap.verisign.com/com/v1/domain/", "net": "https://rdap.verisign.com/net/v1/domain/",
+            "org": "https://rdap.publicinterestregistry.org/rdap/domain/"}.get(name.rsplit(".", 1)[-1], RDAP)  # Ask the registry itself where we can.
     try:
-        status, _, raw = fetch("GET", RDAP + name, {"accept": "application/rdap+json", "user-agent": "chukta/0.1"}, None, 6)
+        for attempt in range(3):
+            status, _, raw = fetch("GET", base + name, {"accept": "application/rdap+json", "user-agent": "chukta/0.1"}, None, 6)
+            if status != 429:
+                break
+            time.sleep(1.2 * (attempt + 1))
         if status != 200:
             return None
         return next((e["eventDate"][:10] for e in json.loads(raw).get("events", []) if e.get("eventAction") == "registration"), None)
@@ -106,10 +113,12 @@ def sweep(db, src, client_id, on_progress=lambda text: None, fetch=http_call):
                 db.execute("INSERT INTO ledger(run_id, source, request, credits, outcome, at, usd) VALUES(?,?,?,?,?,?,?)",
                            (src.run_id, "dns", f"Lookalikes of {vendor['domain']} ({len(names)} names)", 0, f"{len(found)} registered", now(), 0))
         on_progress("Reading registration dates")
-        real_born = dict(zip(real, pool.map(lambda d: registered_on(d, fetch), real)))
-        for hit, born in zip(hits, pool.map(lambda h: registered_on(h["domain"], fetch), hits)):
+    with ThreadPoolExecutor(3) as slow:  # The registry service throttles bursts.
+        real_born = dict(zip(real, slow.map(lambda d: registered_on(d, fetch), real)))
+        settled = (dt.date.fromisoformat(today()) - dt.timedelta(days=SETTLED_DAYS)).isoformat()
+        for hit, born in zip(hits, slow.map(lambda h: registered_on(h["domain"], fetch), hits)):
             hit["created"] = born
-            hit["older"] = bool(born and real_born.get(hit["real"]) and born < real_born[hit["real"]])
+            hit["older"] = bool(born and (born < settled or (real_born.get(hit["real"]) and born < real_born[hit["real"]])))
     on_progress("Checking for honest businesses")
     companies, owners, verified = {}, {}, True
     suspects = [h["domain"] for h in hits if h.get("mail") and not h["older"] and not h["same_ns"]]  # Only these could become threats, so only these cost credits.

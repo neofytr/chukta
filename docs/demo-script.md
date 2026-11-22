@@ -38,8 +38,10 @@ Open `.env` and fill in these values:
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay dashboard, in **Test mode**, under API Keys. The ID must start with `rzp_test_` |
 
 - **Never show `.env` on screen, and never paste keys into a group chat or commit them.**
-- With no keys the app still runs, but it holds nearly every invoice, so the story below will not work. You need the Crustdata and model keys.
-- With no Razorpay keys it uses a local sandbox. The demo still works, but say "local sandbox" instead of "Razorpay test mode".
+- **Crustdata key: needed.** Without it the app holds nearly every invoice and the story will not work. Each team member has their own 15,000 credits.
+- **Model key: needed for the exact script.** Without it the messy Hinglish email is held, so you get 5 clean invoices instead of 6.
+- **Razorpay test keys: optional.** Without them it uses a local sandbox. The demo still works, but say "local sandbox" instead of "Razorpay test mode".
+- **Mail settings: optional.** Without them receipts stay in the outbox and the proof codes still work. To deliver them, fill the `SMTP_` lines and set `RECEIPT_TEST_INBOX` to your own inbox. Chukta never emails a real vendor.
 
 ## 3. Start it
 
@@ -60,6 +62,8 @@ $env:PYTHONUTF8=1; $env:CHUKTA_PAY_DELAY=3; python app.py --reset
 
 Open **http://127.0.0.1:8765** in Chrome. Keep a **second terminal** open in the same folder. `CHUKTA_PAY_DELAY=3` slows payments so you have time to kill the app on camera.
 
+**Then run the radar before recording.** Click **Vendors**, **Imposter Radar**, **Start the sweep**, and wait about a minute. It is too slow to show live in a two-minute video.
+
 ## 4. Do one full rehearsal
 
 Run the whole script below once before recording. Then repeat step 3 to reset. **Each take needs a fresh reset.**
@@ -75,21 +79,7 @@ Run the whole script below once before recording. Then repeat step 3 to reset. *
 
 ## 6. The script
 
-| Time | Do this | Say this |
-| - | - | - |
-| 0:00 | Show the request on **Today** | "CA firms are paid to run payables. Here is a client's request, and Chukta does the job." |
-| 0:06 | Click **Run**. Invoices arrive live | "Twelve invoices, including a messy Hinglish email with a hidden instruction telling the AI to skip checks. An invoice is never evidence for itself, so each claim is checked against a record the sender doesn't control." |
-| 0:26 | When it finishes, click **Review 6** | "Six are clean. Six need a person. Here are three attempts to take this client's money." |
-| 0:32 | **TCI Express** opens first. Point at the red digits | "One: a polite email from the vendor's real domain asks to change bank details. The digits differ from the account on file, so Chukta blocks it and tells the reviewer to call a number already in their records. A real change takes two people." |
-| 0:50 | Click **Moglix, Already on the books** | "Two: the same invoice again, with its number reformatted. It would have been paid twice." |
-| 0:58 | Click **Gati, Can't verify the company** | "Three is the honest case. Gati's domain now resolves to Allcargo. Chukta says it can't verify this and asks a person, without calling anyone a fraud." |
-| 1:06 | **Today**, **Review and sign**, type a name, then **press and hold** the round button | "A person signs, and the payee and amount are frozen." |
-| 1:14 | **Within 5 seconds**, in the second terminal: `kill -9 "$(cat chukta.pid)"` (Windows: `taskkill /F /PID (Get-Content chukta.pid)`) | "Now I kill it in the middle of paying." |
-| 1:18 | Run `python3 app.py` (**without** `--reset`). Go back to Chrome | "It restarts and carries on by itself." |
-| 1:28 | The seal lands. Click **Open run sheet** | "Six invoices, six payment requests in Razorpay test mode, each issued once. This is the finished work: the run sheet, TDS by section, and what was left out and why." |
-| 1:40 | **Break it**, then **Run all attacks** | "Anyone can attack it. Duplicates, changed facts, a dead source, a crash, a second client. Nine of nine stopped." |
-| 1:50 | **Ledger** | "This batch cost about one Crustdata credit and a cent of model calls." |
-| 1:56 | Hold on the screen | "Chukta: every invoice signed by a person and issued once." |
+Read **[docs/two-minute-script.md](two-minute-script.md)**. It has every spoken line and every click, written for two people.
 
 ## 7. If something goes wrong
 
@@ -142,7 +132,10 @@ Finalists are announced at 7:30 PM and must be at the front by 7:40 PM with a ch
 | Why not let an agent decide? | Rewording could change a decision, and a poisoned invoice could steer it. Models read and explain, code verifies, and fixed policy decides |
 | What was the hardest case? | A bank-change email from the vendor's real domain. Domain checks pass, so Chukta relies on the vendor master and a callback to a known number |
 | Who could it get wrong? | An honest small vendor unknown to data sources. It gets "I can't verify" and a person, never a fraud label |
-| How do you know it works? | 12 of 12 labelled decisions on live sources, a real `kill -9` test, nine live attacks, and a benchmark on 2,994 real Indian companies. The 12 cases are ones we wrote |
+| How do you know it works? | 12 of 12 labelled decisions on live sources, a real `kill -9` test, twelve live attacks, and a benchmark on 2,994 real Indian companies. The 12 cases are ones we wrote |
 | A hundred times the volume? | Crustdata's rate limit comes first. We batch 25 domains per call and cache by vendor. SQLite would move to Postgres with a job queue |
 | A second client? | All data is keyed by client, and a live drill proves one client can't use another's vendors. The screen shows one client until real logins exist |
-| What did you leave out? | Real payouts through RazorpayX, OCR for scanned PDFs, logins, and live GSTIN status |
+| What's different about yours? | Imposter Radar finds registered lookalikes of your vendors before their first email. Receipts carry a proof code, and the replay finds one changed rupee |
+| Isn't the radar accusing people? | No. It says a lookalike exists. Old domains, real companies and the vendor's own domains are separated out, and a person can clear any name |
+| Do receipts really email vendors? | Not during the event, because agents can't contact outside people. They go only to our test inbox, and the intended address is shown |
+| What did you leave out? | Real payouts through RazorpayX, real vendor email, OCR for scanned PDFs, logins, and live GSTIN status |

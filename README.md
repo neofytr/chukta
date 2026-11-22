@@ -6,9 +6,9 @@ ContextCon 05, BITS Pilani. Theme 6.1, The Payables Desk.
 
 ![The review screen, showing a blocked invoice whose bank account differs from the vendor master](docs/screens/review.png)
 
-| The payment run | The finished run sheet | Nine live attacks |
-| - | - | - |
-| ![Today screen](docs/screens/today.png) | ![Run sheet](docs/screens/run-sheet.png) | ![Break it screen](docs/screens/break-it.png) |
+| The payment run | Imposter Radar | The finished run sheet | Live attacks |
+| - | - | - | - |
+| ![Today screen](docs/screens/today.png) | ![Imposter Radar](docs/screens/radar.png) | ![Run sheet](docs/screens/run-sheet.png) | ![Break it screen](docs/screens/break-it.png) |
 
 ## The service
 
@@ -38,7 +38,13 @@ ContextCon 05, BITS Pilani. Theme 6.1, The Payables Desk.
 8. Issues payment requests in Razorpay test mode, then produces a printable run sheet, a bank file, Tally vouchers and an audit file that checks each payment against its sign-off.
 9. Posts bank statement lines to the right payee and account, holds duplicate charges, and says "I can't verify" when no record ties a payment to one business.
 10. Opens the exact record behind every finding, with the supporting field marked and its retrieval date.
-11. Lets anyone attack it live. **Audit, Break it** runs nine failure cases through the real decision and payment code on a private copy of the sample books.
+11. Lets anyone attack it live. **Audit, Break it** runs twelve failure cases through the real decision and payment code on a private copy of the sample books.
+12. **Imposter Radar** searches public DNS and registry records for lookalikes of each vendor's domain before a fraud email arrives. It separates old domains, real companies and the vendor's own domains from recent names that can send email, and blocks invoices from those until a person clears them.
+13. **Receipts that prove themselves.** Each issued payment gets a receipt with a proof code. A forged code or an edited payment fails verification. During the event, mail goes only to the team's test inbox.
+14. **Checks a new vendor** against a live Crustdata company record: name, status, age, headcount trend and lookalike risk.
+15. **Closes the month** against a checklist, with payables ageing, TDS by section and a fingerprinted close pack.
+16. **Replays the books line by line**, and shows the exact line when one rupee is changed in a private copy.
+17. **Writes a client update** in English or Hindi, with every number taken from the books, for the CA to read and send.
 
 **Where it still needs a person:** every payment sign-off, every rejection and every exception. Changing a vendor's bank details takes two named people.
 
@@ -68,6 +74,8 @@ The diagram, component boundaries and failure table are in [docs/architecture.md
 | Crustdata `/company/identify` | Vendor domain to company record | Yes |
 | [Razorpay IFSC API](https://ifsc.razorpay.com/) | Bank branch exists | Yes |
 | Razorpay Payment Links, test mode | One payment request per vendor invoice | Yes |
+| Crustdata `/company/enrich` | New vendor's status, age and headcount | Yes |
+| Public DNS and RDAP | Whether a lookalike domain exists, can receive mail, and when it was registered | Yes |
 | GSTR-2B JSON | Supplier filed this invoice | Client file |
 | Vendor master and POs | Payee, order and balance | Client records |
 
@@ -88,7 +96,8 @@ The diagram, component boundaries and failure table are in [docs/architecture.md
 | `kill -9` during reading and again during payment, on the real app in Razorpay test mode | 12 invoices stored once, 6 signed, 6 payment requests, none repeated |
 | Regression checks (`test_chukta.py`) | All pass, including each bug an independent critic reproduced |
 | Prompt injection in an invoice | No effect on the decision |
-| Nine live attacks (duplicate, changed bank, changed PO, timeout, nonsense, injection, crash, second client, "skip the checks") | 9 of 9 stopped |
+| Twelve live attacks (duplicate, changed bank, changed PO, timeout, nonsense, injection, crash, second client, "skip the checks", edited rupee, forged receipt, lookalike sender) | 12 of 12 stopped |
+| Imposter Radar, live sweep on 22 November | 118 lookalike names for 5 vendors, 53 registered, 4 recent names able to send email. 10 names could not be checked |
 | A full 12-invoice run on live sources | About 30 seconds, down from about 115 after making model calls concurrent |
 
 The 12 cases are fictional and were written by us before the run, so they show the behavior but not real-world accuracy. The lookalike attacks are generated edits of real domains, not observed fraud. The full numbers are in [docs/benchmark.json](docs/benchmark.json). Build notes, including what failed, are in [NOTES.md](NOTES.md).
@@ -128,6 +137,7 @@ The full build log is in [NOTES.md](NOTES.md), and each handbook requirement is 
 
 - **Settlement to vendors.** Payment Links are Razorpay test-mode payment requests. Real vendor payouts need RazorpayX and a firm's approval.
 - **Login.** Reviewer names are typed, so the two-person rule compares names and does not prove identity. A firm deployment needs real accounts.
+- **Email to real vendors.** The event forbids contacting outside people, so receipts go only to a test inbox.
 - **OCR for scanned invoices.** Text and email came first.
 - **Live GSTIN status.** We found no free official API and did not scrape the portal.
 - **Binding tax advice.** TDS is a draft for the reviewer. Rates came from official Income Tax pages, but a CA must confirm each case.

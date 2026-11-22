@@ -80,3 +80,14 @@ flowchart TB
 ## At 100 times the volume
 
 The first limit is Crustdata's 5 requests per minute on this key. Each call already batches 25 domains and caches per vendor, so cost grows with new vendors rather than invoices. Next steps would be Postgres with row locks, a job queue per client, and a provider webhook to confirm settlement. A second client is already isolated by `client_id` in every key.
+
+## Flows added later
+
+| Module | Job | Failure behaviour |
+| - | - | - |
+| `chukta/radar.py` | Finds registered lookalikes of vendor domains through DNS, RDAP and Crustdata | A failed lookup is "could not be checked", never safe |
+| `chukta/receipts.py` | Issues a receipt with an HMAC proof code for each payment | Claimed before sending. A crash mid-send is marked unclear and never resent |
+| `chukta/vendorcheck.py` | Checks a new vendor against a live company record | A failed source returns "I can't verify" |
+| `chukta/close.py` | Month-end checklist and fingerprinted close pack | Cannot be signed while any check is open |
+| `chukta/brief.py` | Client update in English or Hindi | A draft for a person to send |
+| `chukta/exports.py` | Line-by-line replay and tamper demo | Tampering runs on an in-memory copy only |

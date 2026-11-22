@@ -25,6 +25,9 @@ All times are IST on 22 November 2026.
 | 15:54 | Restarting the app | A second copy started with `--reset` deleted the running app's books before failing on the port | Bind the port first |
 | 16:01 | Timed a full run from the ledger | About 115 seconds, nearly all waiting on one model call at a time | Four concurrent calls, with invoices still applied in order. About 30 seconds, same decisions |
 | 16:05 | Judges name a duplicate, changed fact, failed call and restart | Showing them took a terminal and luck | Built nine live drills on a private copy of the books |
+| 16:49 | Close totals on real data | A suspected duplicate was counted as money still owed | Duplicates are now reported separately |
+| 17:00 | First live radar sweep | It flagged decades-old domains and the vendor's own domains | Added registration age, name-server and company checks, plus a person's "it's legitimate" |
+| 17:08 | Radar on registry data | The shared RDAP service throttled us, leaving most dates blank | Ask the registries directly. 49 of 53 dated, 4 recent names left to watch |
 
 ## Approaches weighed
 
