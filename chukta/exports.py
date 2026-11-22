@@ -31,9 +31,9 @@ def _orders(db, client_id):
 
 
 def bank_file(db, client_id):
-    rows = [(o["payee_name"], o["account"], o["ifsc"], _money(o["net_paise"]), json.loads(o["fields"])["invoice_no"], o["payment_ref"] or "",
+    rows = [(o["payee_name"], o["account"], o["ifsc"], "RTGS" if o["net_paise"] >= 2_00_000_00 else "NEFT", _money(o["net_paise"]), json.loads(o["fields"])["invoice_no"], o["payment_ref"] or "",
              o["state"]) for o in _orders(db, client_id)]
-    return _csv(("beneficiary", "account", "ifsc", "amount_inr", "narration", "provider_reference", "status"), rows)
+    return _csv(("beneficiary", "account", "ifsc", "mode", "amount_inr", "narration", "provider_reference", "status"), rows)
 
 
 def tally_vouchers(db, client_id):

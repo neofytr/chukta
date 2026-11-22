@@ -29,6 +29,10 @@ class Net:
                 raise TimeoutError
             ok = url.rsplit("/", 1)[1].startswith("HDFC")
             return (200, {}, b'{"BANK":"HDFC Bank","BRANCH":"Test"}') if ok else (404, {}, b'"Not Found"')
+        if url.endswith("/company/search"):
+            ids = json.loads(body)["filters"]["value"]
+            return 200, {"x-credits-used": str(.03 * len(ids))}, json.dumps({"companies": [{"crustdata_company_id": i, "basic_info": {"status": getattr(self, "status", "active")},
+                                                                                     "metadata": {"updated_at": "2026-11-20T00:00:00Z"}} for i in ids]}).encode()
         self.calls += 1
         self.keys.append(headers["authorization"])
         if self.statuses:
@@ -559,6 +563,53 @@ db.execute("UPDATE events SET actor='someone else' WHERE event='approved'")
 db.commit()
 assert any("altered" in p for p in verify_audit(db, "c1")), "an edited trail no longer replays"
 
+# CA research regressions: rates, PAN, transporters, MSME clock, GST deadlines, e-invoices
+from chukta.books import import_pos, import_vendors  # noqa: E402
+
+HUF = (b := "29AABHA1234B1Z") + gstin_check(b)
+db, net, src = desk()
+add_vendor(db, "c1", HUF, "Sharma HUF", "acmetools.in", ACCOUNT, IFSC, onboarded_at="2026-01-01", tds_class="contractor", aliases=["Acme Tools"])
+add_po(db, "c1", "PO-1002", HUF, 20000000)
+i = ingest(db, "c1", invoice(gstin=HUF).replace("PO-1001", "PO-1002"))
+process(db, src)
+approve(db, i, "tester")
+assert db.execute("SELECT tds_paise FROM payment_orders").fetchone()[0] == 100000, "an HUF contractor is 1%"
+db, i, s = run(invoice(), tds_class="contractor", pan_status="inoperative")
+assert s == "HELD" and "20%" in db.execute("SELECT detail FROM findings WHERE check_name='tds'").fetchone()[0]
+db, i, s = run(invoice(), tds_class="contractor", transporter_declared=True)
+approve(db, i, "tester")
+assert s == "READY" and db.execute("SELECT tds_paise FROM payment_orders").fetchone()[0] == 0, "declared small transporter"
+db, net, src = desk(tds_class="contractor")
+add_po(db, "c1", "PO-1001", ACME, 90000000)
+one = ingest(db, "c1", invoice(no="C-1", taxable="25,000.00", tax="4,500.00", total="29,500.00", day="01 Jul 2026"))
+process(db, src)
+approve(db, one, "tester")
+two = ingest(db, "c1", invoice(no="C-2", taxable="90,000.00", tax="16,200.00", total="1,06,200.00", day="01 Aug 2026"))
+process(db, src)
+tds_row = db.execute("SELECT status, detail FROM findings WHERE invoice_id=? AND check_name='tds'", (two,)).fetchone()
+assert tds_row[0] == "unverified" and "₹2,300.00" in tds_row[1], tds_row[1]
+db, i, s = run(invoice(extra="Delivery Date: 01 Oct 2026"), msme="micro")
+assert db.execute("SELECT due_date FROM invoices").fetchone()[0] == "2026-10-16", "the clock starts at delivery"
+db, i, s = run(invoice(), rcm="GTA")
+assert db.execute("SELECT detail FROM findings WHERE check_name='gst'").fetchone()[0].startswith("Reverse charge")
+db, i, s = run(invoice(), einvoice_required=True)
+assert s == "HELD"
+assert run(invoice(extra="IRN: " + "a" * 64), einvoice_required=True)[2] == "READY"
+assert "2027-11-30" in run(invoice())[0].execute("SELECT detail FROM findings WHERE check_name='credit'").fetchone()[0]
+inactive = Net()
+inactive.status = "closed"
+assert run(invoice(), net=inactive)[2] == "HELD", "a closed company is not cleared"
+
+# Books import: an unseen vendor can be set up, and bank details cannot change through a CSV
+db = connect(":memory:")
+add_client(db, "c1", "Client")
+NEW = (b := "27AABCN1234B1Z") + gstin_check(b)
+assert import_vendors(db, "c1", f"gstin,name,domain,account,ifsc,tds_class\n{NEW},New Vendor Pvt Ltd,newvendor.in,50100999988887,HDFC0000001,goods") == 1
+assert import_pos(db, "c1", f"po,gstin,amount\nPO-9,{NEW},\"1,00,000\"") == 1
+assert refuses(import_vendors, db, "c1", f"gstin,name,domain,account,ifsc\n{NEW},New Vendor Pvt Ltd,newvendor.in,50100111122223,HDFC0000001"), "a CSV cannot change bank details"
+assert refuses(import_vendors, db, "c1", "gstin,name,domain,account,ifsc\n29AAAAA0000A1ZZ,Bad,bad.in,50100999988887,HDFC0000001")
+assert refuses(import_pos, db, "c1", "po,gstin,amount\nPO-1,27AAPFU0939F1ZV,100"), "a PO needs a known vendor"
+
 # Request intake: wording can never switch a control off
 from chukta.demo import SAMPLE_STATEMENT, STATEMENT_EXPECTED  # noqa: E402
 from chukta.records import record  # noqa: E402
@@ -586,6 +637,8 @@ assert record(db, i, "nonsense") is None
 # The handbook's bank-statement test case
 class StatementNet(Net):
     def __call__(self, method, url, headers, body, timeout=20):
+        if url.endswith("/company/search"):
+            return super().__call__(method, url, headers, body, timeout)
         if "ifsc" not in url and "names" in json.loads(body):
             self.calls += 1
             if self.crust_down:

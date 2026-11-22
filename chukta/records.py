@@ -53,8 +53,8 @@ def record(db, invoice_id, check):
     if check == "gstin":
         return base | {"title": "GSTIN checksum", "kind": "fields", "rows": [_row("GSTIN on invoice", inv["gstin"], True),
                        _row("Result", "Check digit is valid" if finding["status"] == "pass" else "Check digit is wrong", True), _row("Method", "GST check-digit algorithm, computed locally")]}
-    if check in ("vendor", "bank", "msme", "tds", "sender") and vendor:
-        marks = {"vendor": ("name", "gstin"), "bank": ("account",), "msme": ("msme",), "tds": ("tds",)}[check]
+    if check in ("vendor", "bank", "msme", "tds", "credit") and vendor:
+        marks = {"vendor": ("name", "gstin"), "bank": ("account",), "msme": ("msme",), "tds": ("tds",), "credit": ()}[check]
         rows = _vendor_rows(vendor, marks)
         if check == "bank":
             rows = [_row("Account on invoice", ", ".join(_mask(a) for a in f["accounts"]) or "None", finding["status"] != "pass"),
@@ -83,7 +83,7 @@ def record(db, invoice_id, check):
         match = (json.loads(hit[0]).get("match") if hit else None) or {}
         return base | {"title": "Crustdata company record", "kind": "fields",
                        "rows": [_row("Looked up", vendor["domain"]), _row("basic_info.name", match.get("name"), True), _row("Crustdata company ID", match.get("id")),
-                                _row("Primary domain", match.get("domain")), _row("All domains", ", ".join(match.get("all_domains") or [])), _row("Match confidence", match.get("confidence")),
+                                _row("Primary domain", match.get("domain")), _row("All domains", ", ".join(match.get("all_domains") or [])), _row("Match confidence", match.get("confidence")), _row("Status", match.get("status"), True), _row("Record last updated", (match.get("updated_at") or "")[:10]),
                                 _row("Name on vendor master", vendor["name"], True), _row("Confirmed other names", ", ".join(json.loads(vendor["aliases"])))]}
     if check == "gst":
         key = number_key(f.get("invoice_no") or "")

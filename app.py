@@ -14,6 +14,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from chukta.books import books_payload, import_2b, import_pos, import_vendors
 from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
 from chukta.desk import (HARD_STOPS, SandboxBank, _rupees, add_alias, approve, approve_bank_change, compute_tds, connect, ingest, now, parse, pay_approved, process,
                          propose_bank_change, recheck, reject)
@@ -318,6 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, ledger_payload(db))
             if path == "/api/statement":
                 return self._send(200, statement_payload(db, CLIENT) | {"sample": SAMPLE_STATEMENT})
+            if path == "/api/books":
+                return self._send(200, books_payload(db, CLIENT))
             if path == "/api/replay":
                 return self._send(200, replay_lines(db, CLIENT))
             if path == "/export/bank.csv":
@@ -336,7 +339,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         try:
             size = int(self.headers.get("content-length", 0))
-            if size > MAX_BODY:
+            if not 0 <= size <= MAX_BODY:
                 return self._send(413, {"error": "too large"})
             body = json.loads(self.rfile.read(size) or b"{}")
             if not isinstance(body, dict):
@@ -369,6 +372,12 @@ class Handler(BaseHTTPRequestHandler):
             if not start_job("Posting the statement", run_statement, text):
                 raise ValueError("Chukta is already working")
             return {"ok": True}
+        if path in ("/api/books/vendors", "/api/books/pos", "/api/books/gstr2b"):
+            if JOB["running"]:
+                raise ValueError("Chukta is working. Try again when it finishes.")
+            text = str(body.get("text") or "")[:400000]
+            result = {"vendors": import_vendors, "pos": import_pos, "gstr2b": import_2b}[path.rsplit("/", 1)[1]](db, CLIENT, text)
+            return {"ok": True, "result": result}
         by = str(body.get("by") or "").strip()[:80]
         if not by:
             raise ValueError("Enter the reviewer's name first")

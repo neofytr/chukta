@@ -317,7 +317,7 @@ async function renderDetail() {
   if (route[1] !== id) return;
   const key = JSON.stringify([d.state, d.findings, d.investigation?.at, d.order, d.payment_ref, d.can_approve]);
   if (sigs.detail === id + key || ["note", "tdsIn", "byDecide"].includes(document.activeElement?.id)) return;
-  const fresh = !sigs.detail.startsWith(id + "[");
+  const fresh = !(sigs.detail || "").startsWith(id + "[");
   sigs.detail = id + key; detailData = d;
   const node = detailView(d);
   if (!fresh) node.style.animation = "none";

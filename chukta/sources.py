@@ -11,7 +11,7 @@ API = "https://api.crustdata.com"
 IFSC_API = "https://ifsc.razorpay.com/"
 API_VERSION = "2025-11-01"
 # Real limits for this key, from GET /account/endpoints. Tune here if the plan changes.
-RPM = {"/company/identify": 5, "ifsc": 60}
+RPM = {"/company/identify": 5, "/company/search": 5, "ifsc": 60}
 CACHE_TTL_S = 86400
 MAX_WAIT_S = 60
 
@@ -220,9 +220,23 @@ class Sources:
             except (KeyError, TypeError, AttributeError, IndexError, ValueError) as e:
                 self.down["crustdata"] = "Crustdata returned an unusable record"
                 raise SourceDown(self.down["crustdata"]) from e
+            ids = [out[d]["match"]["id"] for d in chunk if out[d]["match"]]
+            meta = self._company_meta(ids) if ids else {}
             for domain in chunk:  # Stored only after the whole reply validates.
+                if out[domain]["match"]:
+                    out[domain]["match"]["status"], out[domain]["match"]["updated_at"] = meta.get(out[domain]["match"]["id"], (None, None))
                 self._store(f"identify:{domain}", out[domain])
         return out
+
+    def _company_meta(self, ids):
+        """Active status and the record's own date. Worth 0.03 credits each, and optional: a miss only omits them."""
+        try:
+            page = self._attempt("crustdata", "/company/search", API + "/company/search", {
+                "filters": {"field": "crustdata_company_id", "type": "in", "value": ids}, "limit": len(ids),
+                "fields": ["basic_info.status", "metadata.updated_at"]}, 0.03 * len(ids), False)
+            return {c["crustdata_company_id"]: ((c.get("basic_info") or {}).get("status"), (c.get("metadata") or {}).get("updated_at")) for c in page["companies"]}
+        except (SourceDown, KeyError, TypeError, AttributeError):
+            return {}
 
     def identify_names(self, names):
         """Every company trading under each name. A name alone is evidence of ambiguity, never of identity."""

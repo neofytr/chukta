@@ -63,8 +63,9 @@ CREATE TABLE IF NOT EXISTS bank_lines(id INTEGER PRIMARY KEY, client_id TEXT NOT
 """
 REQUIRED = ("invoice_no", "invoice_date", "amount_paise", "gstin")
 # A person cannot approve past these. The document must be corrected or rejected.
-HARD_STOPS = ("required", "document", "vendor", "duplicate", "payment_conflict", "invoice_date", "instruction")
-MIGRATIONS = (("invoices", "master_hash", "TEXT"), ("events", "prev_hash", "TEXT NOT NULL DEFAULT ''"), ("events", "hash", "TEXT NOT NULL DEFAULT ''"))
+HARD_STOPS = ("required", "document", "vendor", "duplicate", "payment_conflict", "invoice_date", "instruction", "internal")
+MIGRATIONS = (("vendors", "pan_status", "TEXT NOT NULL DEFAULT 'operative'"), ("vendors", "transporter_declared", "INTEGER NOT NULL DEFAULT 0"),
+              ("vendors", "rcm", "TEXT"), ("vendors", "einvoice_required", "INTEGER NOT NULL DEFAULT 0"), ("invoices", "master_hash", "TEXT"), ("events", "prev_hash", "TEXT NOT NULL DEFAULT ''"), ("events", "hash", "TEXT NOT NULL DEFAULT ''"))
 STALE_INVOICE_DAYS = 365  # Older than this needs a person. Tune per client.
 REPEAT_ON_PO_DAYS = 180  # Same amount on the same PO inside this window is held as a possible re-presentation.
 OK_STATUSES = ("pass", "info")
@@ -118,12 +119,15 @@ def add_client(db, client_id, name):
 
 
 def add_vendor(db, client_id, gstin, name, domain, account, ifsc, emails=(), aliases=(), onboarded_at=None, msme=None,
-               agreement_days=None, tds_class=None, payee_type="other", gst_filing="monthly", opening_fy=None, opening_taxable_paise=0):
+               agreement_days=None, tds_class=None, payee_type="other", gst_filing="monthly", opening_fy=None, opening_taxable_paise=0,
+               pan_status="operative", transporter_declared=False, rcm=None, einvoice_required=False):
     with db:
-        db.execute("INSERT OR REPLACE INTO vendors VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT OR REPLACE INTO vendors(client_id, gstin, name, domain, account, ifsc, emails, aliases, onboarded_at, msme, agreement_days, tds_class, "
+                   "payee_type, gst_filing, opening_fy, opening_taxable_paise, pan_status, transporter_declared, rcm, einvoice_required) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (client_id, gstin, name, domain.lower(), account, ifsc, json.dumps([e.lower() for e in emails]),
                     json.dumps(list(aliases)), onboarded_at, msme, agreement_days, tds_class, payee_type, gst_filing,
-                    opening_fy, opening_taxable_paise))
+                    opening_fy, opening_taxable_paise, pan_status, int(transporter_declared), rcm, int(einvoice_required)))
 
 
 def add_po(db, client_id, po, gstin, amount_paise):
@@ -172,6 +176,11 @@ def _invoice_date(text):
         if (m.group(1) or "").lower() not in ("due", "po", "order", "delivery", "payment", "ship", "shipping", "dispatch"):
             return _date(m.group(2))
     return None
+
+
+def _delivery_date(text):
+    m = re.search(rf"\b(?:delivery|delivered|goods\s+received|grn|services?\s+rendered)(?:\s+date|\s+on)?\b\s*[:#-]?\s*{DATE}", text, re.I)
+    return _date(m.group(1)) if m else None
 
 
 def _amounts(text):
@@ -267,6 +276,8 @@ def parse(text):
     return {
         "invoice_no": _invoice_no(text),
         "invoice_date": _invoice_date(text),
+        "delivery_date": _delivery_date(text),
+        "irn": (re.search(r"\bIRN\b\s*[:#-]?\s*([0-9a-f]{64})\b", text, re.I) or [None, None])[1],
         "po": _po(text),
         "amount_paise": amount,
         "taxable_paise": taxable,
@@ -402,28 +413,31 @@ def _rupees(paise):
     return f"₹{text}.{frac:02d}"
 
 
-def msme_due(vendor, invoice_date):
-    """Section 15 runs from acceptance. ponytail: uses invoice date, the earliest case, until goods-receipt dates exist."""
-    if not vendor or vendor["msme"] not in ("micro", "small") or not invoice_date:
+def msme_due(vendor, invoice_date, delivery_date=None):
+    """MSMED s.15 runs from delivery or rendering. Without that date the invoice date is used, and the finding says so."""
+    start = delivery_date or invoice_date
+    if not vendor or vendor["msme"] not in ("micro", "small") or not start:
         return None
     days = min(vendor["agreement_days"] or 15, 45)
-    return (date.fromisoformat(invoice_date) + timedelta(days=days)).isoformat()
+    return (date.fromisoformat(start) + timedelta(days=days)).isoformat()
 
 
 def _check_msme(add, vendor, inv, as_of):
-    source = "vendors.msme; Income-tax Act 1961 s.43B(h) and its 2025 Act equivalent; MSMED Act s.15"
+    source = "vendors.msme; MSMED Act s.15; Income-tax Act 1961 s.43B(h), carried into the 2025 Act as s.37(2)(g)"
+    delivery = json.loads(inv["fields"]).get("delivery_date")
     kind = vendor["msme"]
     if kind is None:
         add("msme", "info", "I can't verify MSME status: the vendor master has no Udyam details.", "vendors.msme")
     elif kind == "trader":
-        add("msme", "info", "Registered as a trader. Whether the payment deadline applies needs a person's review.", source)
+        add("msme", "info", "Registered as a trader, which is generally outside section 15. Confirm the Udyam activity.", source)
     elif kind not in ("micro", "small"):
         add("msme", "info", f"Vendor is {kind}, so the micro and small enterprise deadline does not apply.", "vendors.msme")
     elif inv["invoice_date"]:
-        due = msme_due(vendor, inv["invoice_date"])
+        due = msme_due(vendor, inv["invoice_date"], delivery)
         left = (date.fromisoformat(due) - date.fromisoformat(as_of)).days
         state = f"overdue by {-left} days, so the tax deduction moves to the year it is paid" if left < 0 else f"{left} days left"
-        add("msme", "info", f"{kind.title()} enterprise. Pay by {due} ({state}).", source)
+        basis = "from the delivery date" if delivery else "from the invoice date, because no delivery date is recorded. Delivery may be earlier"
+        add("msme", "info", f"{kind.title()} enterprise. Pay by {due} ({state}), counted {basis}.", source)
 
 
 TDS_THRESHOLD_PAISE = {"contractor": 100_000_00, "professional": 50_000_00, "technical": 50_000_00}
@@ -439,6 +453,9 @@ def compute_tds(db, vendor, inv):
     base = inv["taxable_paise"]
     if not base:
         return None, "unverified", "I can't verify TDS: the taxable value is unclear."
+    pan_ok = vendor["pan_status"] == "operative"
+    if kind == "contractor" and vendor["transporter_declared"] and pan_ok:
+        return 0, "pass", "Nil TDS: transporter with up to 10 goods carriages, PAN and declaration on file. Report it in the TDS return."
     prior = db.execute("SELECT COALESCE(SUM(taxable_paise), 0) FROM invoices WHERE client_id=? AND gstin=? AND fy=? AND id<? AND state IN "
                        "('READY','HELD','APPROVED','PAID') AND id NOT IN (SELECT invoice_id FROM findings WHERE check_name='duplicate' "
                        "AND status='fail')", (inv["client_id"], inv["gstin"], inv["fy"], inv["id"])).fetchone()[0]
@@ -446,22 +463,52 @@ def compute_tds(db, vendor, inv):
         prior += vendor["opening_taxable_paise"]
     limit = TDS_THRESHOLD_PAISE[kind]
     if kind == "contractor":
-        basis_points, entry = (100 if vendor["payee_type"] == "individual" else 200), "6(i)"
+        personal = vendor["payee_type"] == "individual" or (len(vendor["gstin"]) >= 12 and vendor["gstin"][5] in "PH")  # PAN's fourth letter.
+        basis_points, entry = (100 if personal else 200), "6(i)"
         exempt = base <= 30_000_00 and prior + base <= limit
     else:
         basis_points, entry = (1000 if kind == "professional" else 200), "6(iii)"
         exempt = prior + base <= limit
     if exempt:
         return 0, "pass", f"Draft TDS nil: below the threshold in s.393(1) Table {entry}."
-    tds = (base * basis_points // 10000 + 50) // 100 * 100  # Nearest rupee.
+    if not pan_ok:
+        basis_points = max(basis_points, 2000)
+    nearest = lambda paise: (paise * basis_points // 10000 + 50) // 100 * 100  # Nearest rupee.
+    tds = nearest(base)
     detail = f"Draft TDS {_rupees(tds)}: {basis_points / 100:g}% of {_rupees(base)} under s.393(1) Table {entry}."
+    if not pan_ok:
+        return tds, "unverified", f"{detail} PAN is missing or inoperative, so the higher 20% rate under s.397(2) applies."
     if 0 < prior <= limit < prior + base:
-        return tds, "unverified", f"{detail} The financial-year total just crossed {_rupees(limit)}, so earlier invoices may need TDS too."
+        already = db.execute("SELECT COALESCE(SUM(o.tds_paise), 0) FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.client_id=? AND i.gstin=? AND i.fy=? "
+                             "AND i.id<?", (inv["client_id"], inv["gstin"], inv["fy"], inv["id"])).fetchone()[0]
+        catch_up = max(tds, nearest(prior + base) - already)
+        return catch_up, "unverified", (f"Draft TDS {_rupees(catch_up)}: the financial-year total crossed {_rupees(limit)}, so TDS applies to the whole {_rupees(prior + base)}. "
+                                        "Confirm what was already deducted.")
     return tds, "pass", detail
+
+
+def _check_credit(add, inv, as_of):
+    """Section 16(4) claim deadline and the 180-day payment rule in CGST Rule 37."""
+    if not inv["invoice_date"] or not inv["tax_paise"]:
+        return
+    day, today_ = date.fromisoformat(inv["invoice_date"]), date.fromisoformat(as_of)
+    start = day.year if day.month >= 4 else day.year - 1
+    claim_by, pay_by = date(start + 1, 11, 30), day + timedelta(days=180)
+    source = "CGST Act s.16(4); CGST Rule 37"
+    if today_ > claim_by:
+        add("credit", "info", f"The s.16(4) window for this invoice's credit closed on {claim_by}, or earlier if the annual return was filed.", source)
+    elif today_ > pay_by:
+        add("credit", "info", f"Unpaid past 180 days ({pay_by}). Reverse {_rupees(inv['tax_paise'])} of credit with interest until it is paid.", source)
+    else:
+        urgent = "Claim soon. " if (claim_by - today_).days <= 15 else ""
+        add("credit", "info", f"{urgent}Claim GST credit by {claim_by}. Pay by {pay_by} to avoid reversing it.", source)
 
 
 def _check_gst(add, db, inv, f, vendor):
     if not (inv["gstin"] and f.get("invoice_no") and inv["invoice_date"]):
+        return
+    if vendor and vendor["rcm"]:
+        add("gst", "info", f"Reverse charge ({vendor['rcm']}): the client pays this tax, so it is not expected in the supplier's GSTR-2B.", "vendors.rcm")
         return
     period = inv["invoice_date"][:7]
     year, month = int(period[:4]), int(period[5:])
@@ -481,8 +528,8 @@ def _check_gst(add, db, inv, f, vendor):
         return
     imported = db.execute("SELECT imported_at FROM gstr2b_imports WHERE client_id=? AND period=?", (inv["client_id"], closes)).fetchone()
     if imported:
-        add("gst", "fail", f"Not in the imported GSTR-2B for {closes}. {_rupees(tax)} of GST credit is at risk. "
-            "Consider retaining the GST until the supplier files.", f"gstr2b_imports:{closes}", imported["imported_at"][:10])
+        add("gst", "fail", f"Not yet reflected in the imported GSTR-2B for {closes}. {_rupees(tax)} of GST credit is at risk. "
+            "A late filing can appear in a later statement, so consider retaining the GST until it does.", f"gstr2b_imports:{closes}", imported["imported_at"][:10])
     else:
         next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
         add("gst", "info", f"GST credit pending: GSTR-2B for {closes} is expected from {next_year}-{next_month:02d}-14 and is not imported yet.",
@@ -609,6 +656,12 @@ def run_checks(db, src, inv, as_of=None):
         _check_sender(add, vendor, f["sender_emails"])
         _check_company(add, src, vendor)
         _check_msme(add, vendor, inv, as_of)
+        _check_credit(add, inv, as_of)
+        if vendor["einvoice_required"]:
+            if f.get("irn"):
+                add("einvoice", "pass", "An IRN in the right format is on this invoice. It was not checked against the e-invoice portal.", "invoice text")
+            else:
+                add("einvoice", "fail", "This supplier must issue e-invoices, and no valid IRN is on this document.", "CGST Rule 48")
         _, tds_status, tds_detail = compute_tds(db, vendor, inv)
         add("tds", tds_status, tds_detail, "vendors.tds_class; Income-tax Act 2025 s.393")
     return out
@@ -662,10 +715,13 @@ def _check_company(add, src, vendor):
         return
     cite = f"{where}#{m['id']}.basic_info.name"
     names = [vendor["name"], *json.loads(vendor["aliases"])]
-    if (m.get("confidence") or 0) < MIN_MATCH_CONFIDENCE:
+    if m.get("status") and m["status"] != "active":
+        add("company", "unverified", f"I can't verify the company is trading: its record for {real} says {m['status']}.", cite, got["retrieved_at"])
+    elif (m.get("confidence") or 0) < MIN_MATCH_CONFIDENCE:
         add("company", "unverified", f"I can't verify the company: the match for {real} is low confidence.", cite, got["retrieved_at"])
     elif any(same_company(n, m["name"]) for n in names):
-        add("company", "pass", f"{real} resolves to {m['name'].rstrip('.')}.", cite, got["retrieved_at"])
+        add("company", "pass", f"{real} resolves to {m['name'].rstrip('.')}" + (f", {m['status']}, record updated {m['updated_at'][:10]}." if m.get("status") and m.get("updated_at") else "."),
+            cite, got["retrieved_at"])
     else:
         add("company", "unverified", f"I can't verify the company: {real} resolves to {m['name']}, but the master says {vendor['name']}.",
             cite, got["retrieved_at"])
@@ -700,7 +756,7 @@ def process(db, src, as_of=None):
             state = decide(findings)
             vendor = db.execute("SELECT * FROM vendors WHERE client_id=? AND gstin=?", (inv["client_id"], inv["gstin"])).fetchone()
             db.execute("UPDATE invoices SET state=?, due_date=?, master_hash=? WHERE id=? AND state='NEW'",
-                       (state, msme_due(vendor, inv["invoice_date"]), master_hash(vendor), inv["id"]))
+                       (state, msme_due(vendor, inv["invoice_date"], json.loads(inv["fields"]).get("delivery_date")), master_hash(vendor), inv["id"]))
             _event(db, inv["id"], "checked", "chukta", state)
 
 
@@ -860,7 +916,8 @@ def recheck(db, src, invoice_id, by):
         if not inv or inv["state"] not in ("READY", "HELD", "BLOCKED", "APPROVED"):
             raise ValueError(f"invoice {invoice_id} cannot be rechecked")
         order = db.execute("SELECT idempotency_key FROM payment_orders WHERE invoice_id=?", (invoice_id,)).fetchone()
-        if order and db.execute("SELECT 1 FROM provider_payments WHERE idempotency_key=?", (order[0],)).fetchone():
+        if order and (db.execute("SELECT 1 FROM provider_payments WHERE idempotency_key=?", (order[0],)).fetchone() or
+                      db.execute("SELECT 1 FROM events WHERE invoice_id=? AND event='payment_attempt' AND detail=?", (invoice_id, order[0])).fetchone()):
             raise ValueError(f"invoice {invoice_id} already has a payment. Run the payment step to record it.")
         db.execute("DELETE FROM payment_orders WHERE invoice_id=?", (invoice_id,))
         db.execute("UPDATE invoices SET state='NEW' WHERE id=?", (invoice_id,))
@@ -903,6 +960,8 @@ def pay_approved(db, bank):
         orders = db.execute("SELECT o.* FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE i.state='APPROVED' "
                             "ORDER BY COALESCE(i.due_date, '9999'), o.invoice_id").fetchall()
         for o in orders:
+            if db.execute("SELECT state FROM invoices WHERE id=?", (o["invoice_id"],)).fetchone()[0] != "APPROVED":
+                continue  # Rejected or rechecked after this batch was read.
             vendor = db.execute("SELECT account, ifsc FROM vendors WHERE client_id=? AND gstin=?", (o["client_id"], o["payee_gstin"])).fetchone()
             sent = db.execute("SELECT 1 FROM provider_payments WHERE idempotency_key=?", (o["idempotency_key"],)).fetchone()
             if not sent and (not vendor or (vendor["account"], vendor["ifsc"]) != (o["account"], o["ifsc"])):
@@ -913,6 +972,8 @@ def pay_approved(db, bank):
                     db.execute("UPDATE invoices SET state='HELD' WHERE id=? AND state='APPROVED'", (o["invoice_id"],))
                     _event(db, o["invoice_id"], "master_changed", "chukta", "payment stopped")
                 continue
+            with db:  # Recorded first, so an unclear provider reply can never be rechecked away.
+                _event(db, o["invoice_id"], "payment_attempt", "chukta", o["idempotency_key"])
             try:
                 ref = bank.pay(o["idempotency_key"], o["account"], o["ifsc"], o["net_paise"])
             except PaymentUnavailable as e:
