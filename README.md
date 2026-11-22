@@ -4,6 +4,12 @@
 
 ContextCon 05, BITS Pilani. Theme 6.1, The Payables Desk.
 
+![The review screen, showing a blocked invoice whose bank account differs from the vendor master](docs/screens/review.png)
+
+| The payment run | The finished run sheet | Nine live attacks |
+| - | - | - |
+| ![Today screen](docs/screens/today.png) | ![Run sheet](docs/screens/run-sheet.png) | ![Break it screen](docs/screens/break-it.png) |
+
 ## The service
 
 **Who does this today:** CA firms and outsourced accounting teams, paid by small and mid-size businesses to match invoices, verify vendors, deduct TDS and release payments.
@@ -29,9 +35,10 @@ ContextCon 05, BITS Pilani. Theme 6.1, The Payables Desk.
 5. Drafts TDS under section 393 and orders payment by MSME deadline.
 6. An investigator agent explains each exception using read-only tools. Code verifies its citations and numbers.
 7. A named reviewer signs with a press-and-hold, which freezes the payee and amount.
-8. Issues payment requests in Razorpay test mode, then produces a bank file, Tally vouchers and an audit file that checks each payment against its sign-off.
+8. Issues payment requests in Razorpay test mode, then produces a printable run sheet, a bank file, Tally vouchers and an audit file that checks each payment against its sign-off.
 9. Posts bank statement lines to the right payee and account, holds duplicate charges, and says "I can't verify" when no record ties a payment to one business.
 10. Opens the exact record behind every finding, with the supporting field marked and its retrieval date.
+11. Lets anyone attack it live. **Audit, Break it** runs nine failure cases through the real decision and payment code on a private copy of the sample books.
 
 **Where it still needs a person:** every payment sign-off, every rejection and every exception. Changing a vendor's bank details takes two named people.
 
@@ -46,7 +53,7 @@ python3 eval.py           # labelled batch, offline
 python3 app.py --reset    # http://127.0.0.1:8765
 ```
 
-For live data, run `cp .env.example .env` and fill it in, then `python3 eval.py --live`. Without keys, Chukta still runs, uses a local sandbox, and holds what it cannot verify. Use fictional data only on a free model key.
+**No keys are needed to run it.** Without keys, the checks, the eval, the drills and the app all work with a local payment sandbox, and the app holds most invoices because it cannot verify them. For the live flow, run `cp .env.example .env`, add your own Crustdata, model and Razorpay test keys, then run `python3 eval.py --live`. Use fictional data only on a free model key.
 
 To show a crash, start with `CHUKTA_PAY_DELAY=3 python3 app.py --reset`, release payments, run `kill -9 "$(cat chukta.pid)"`, then start `python3 app.py`.
 
@@ -78,9 +85,11 @@ The diagram, component boundaries and failure table are in [docs/architecture.md
 | Lookalike domains generated from 2,994 real Indian company domains | 99.8% blocked. The same brand on another TLD is held instead |
 | Honest domain pairs wrongly blocked | 14 of 300,000 |
 | Sampled company names shared by two or more companies | 33.2% of 500, which is why a name alone never identifies a payee |
-| `kill -9` during payment on the real app, Razorpay test mode | 6 invoices, 6 payments |
+| `kill -9` during reading and again during payment, on the real app in Razorpay test mode | 12 invoices stored once, 6 signed, 6 payment requests, none repeated |
 | Regression checks (`test_chukta.py`) | All pass, including each bug an independent critic reproduced |
 | Prompt injection in an invoice | No effect on the decision |
+| Nine live attacks (duplicate, changed bank, changed PO, timeout, nonsense, injection, crash, second client, "skip the checks") | 9 of 9 stopped |
+| A full 12-invoice run on live sources | About 30 seconds, down from about 115 after making model calls concurrent |
 
 The 12 cases are fictional and were written by us before the run, so they show the behavior but not real-world accuracy. The lookalike attacks are generated edits of real domains, not observed fraud. The full numbers are in [docs/benchmark.json](docs/benchmark.json). Build notes, including what failed, are in [NOTES.md](NOTES.md).
 
@@ -103,6 +112,11 @@ The full build log is in [NOTES.md](NOTES.md), and each handbook requirement is 
 - **Buyer:** a CA firm running payables for many SME clients.
 - **Proposed price:** ₹40 per invoice, a hypothesis to test with firms. Indian benchmarks for manual or outsourced processing run from roughly [₹60 to ₹150](https://tallysolutions.com/accounting/the-roi-of-accounts-payable-automation-calculating-the-cost-of-a-manual-invoice/) up to [₹250](https://www.incorpx.io/accounts-payable-services), mostly from vendor sources.
 - **Measured cost of a 12-invoice run:** 1.15 Crustdata credits and about $0.01 of model calls, or 0.096 credits and $0.00085 per invoice. Half went straight through, and six needed a reviewer. Company lookups are cached, so repeat vendors cost less.
+
+## A second client, or 100 times the volume
+
+- **A second client.** Every invoice, vendor, PO and payment is keyed by client, and the "second client" drill shows one client's invoice cannot use another's vendors or POs. The screen shows one client today, and a client switcher comes with real logins.
+- **100 times the volume.** The first limit is Crustdata's 5 requests a minute on this key. Each request carries 25 domains and results are cached by vendor, so cost grows with new vendors, not invoices. SQLite's single writer is next, and would move to Postgres with a job queue per firm.
 
 ## Who it could get wrong
 

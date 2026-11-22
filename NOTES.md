@@ -21,6 +21,10 @@ All times are IST on 22 November 2026.
 | 14:54 | Red-team review | A re-presented duplicate could pay twice, and a master or PO could change after signing | Fixed each, with a regression test |
 | 14:54 | Benchmark on 2,994 real Indian companies | 33.2% of 500 sampled names were shared. After tuning, 99.8% of generated lookalikes were blocked and 14 of 300,000 honest pairs were wrongly blocked | Never identify a payee by name alone |
 | 15:12 | Browser click-through of the rebuilt UI | Approving a held invoice did not prove which evidence the reviewer had seen | Approvals now carry the evidence hash and fail if it changed |
+| 15:43 | Font audit | The font had no ₹ glyph, so every amount fell back to another typeface | Rebuilt the subset with ₹ and the rounded axis |
+| 15:54 | Restarting the app | A second copy started with `--reset` deleted the running app's books before failing on the port | Bind the port first |
+| 16:01 | Timed a full run from the ledger | About 115 seconds, nearly all waiting on one model call at a time | Four concurrent calls, with invoices still applied in order. About 30 seconds, same decisions |
+| 16:05 | Judges name a duplicate, changed fact, failed call and restart | Showing them took a terminal and luck | Built nine live drills on a private copy of the books |
 
 ## Approaches weighed
 

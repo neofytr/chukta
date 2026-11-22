@@ -75,7 +75,7 @@ function money(text, key) {
     requestAnimationFrame(() => requestAnimationFrame(() => strip.style.setProperty("--d", c)));
     return h("span", { class: "col", "aria-hidden": "true" }, strip);
   });
-  return h("span", { class: "amount num roll", role: "text", "aria-label": text }, columns, h("small", { "aria-hidden": "true" }, m[2]));
+  return h("span", { class: "amount num roll", role: "img", "aria-label": text }, columns, h("small", { "aria-hidden": "true" }, m[2]));
 }
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function day(iso) {
@@ -239,6 +239,7 @@ function wave() {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"), path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   let d = "M0 5"; for (let x = 0; x < 2400; x += 16) d += ` q8 ${x % 32 ? 7 : -7} 16 0`;
   path.setAttribute("d", d); svg.setAttribute("viewBox", "0 0 2400 10"); svg.setAttribute("preserveAspectRatio", "xMinYMid slice"); svg.append(path);
+  svg.style.animationDelay = `${-(performance.now() % 1000)}ms`; // The page redraws while running, so the wave keeps its phase.
   return svg;
 }
 function morphing(el) {
@@ -326,7 +327,7 @@ function renderToday() {
   const plan = h("details", { class: "fold", open: busy || planOpen, ontoggle: e => { if (!busy) planOpen = e.target.open; } },
     h("summary", {}, "Plan", h("small", {}, `${steps.filter(s => s.st === "done").length} of ${steps.length} done`), icon("more", 22)),
     h("div", {}, h("ol", { class: "steps" }, steps.map((s, i) => h("li", { class: "step " + s.st + (s.st === "done" && !doneSteps.has(i) && (doneSteps.add(i), true) ? " pop" : ""), "aria-current": s.st === "active" ? "step" : null },
-      h("span", { class: "st" }, s.st === "done" ? icon("check", 16) : s.st === "need" ? icon("user", 16) : String(i + 1)),
+      h("span", { class: "st", style: s.st === "active" ? { animationDelay: `${-(performance.now() % 3000)}ms` } : null }, s.st === "done" ? icon("check", 16) : s.st === "need" ? icon("user", 16) : String(i + 1)),
       h("div", {}, h("div", { class: "title-s" }, s.title), h("div", { class: "body-s" }, s.note),
         s.st === "active" ? h("div", { class: "wave", style: s.pct !== undefined ? { width: Math.max(8, s.pct * 100) + "%" } : null }, wave()) : null))))));
   const ceiling = h("details", { class: "fold" }, h("summary", {}, "Run ceiling", h("small", {}, `${r.credits} of ${r.credit_limit} credits`), icon("more", 22)),
@@ -537,7 +538,7 @@ function undoPending(entry) {
 
 /* Record sheet */
 function digitRow(text, other, offset) {
-  return h("span", { class: "digits", "aria-label": text }, [...text].map((c, i) => h("i", { class: c !== [...other][i] ? "diff" : "", "aria-hidden": "true", style: { animationDelay: reduced.matches ? "0ms" : `${(offset + i) * 40}ms` } }, c)));
+  return h("span", { class: "digits", role: "img", "aria-label": text }, [...text].map((c, i) => h("i", { class: c !== [...other][i] ? "diff" : "", "aria-hidden": "true", style: { animationDelay: reduced.matches ? "0ms" : `${(offset + i) * 40}ms` } }, c)));
 }
 async function openRecord(invoice, check) {
   let r;
