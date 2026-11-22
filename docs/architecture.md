@@ -2,6 +2,8 @@
 
 **The invariant:** money moves only for an invoice a named person approved, to the account on the vendor master, at most once per vendor invoice. No model output or invoice text can change this.
 
+![How Chukta is built](diagram.png)
+
 ```mermaid
 flowchart TB
   ASK["Request in the customer's words"] --> PLAN["Plan and stored inputs<br/>wording cannot switch off a control"]
