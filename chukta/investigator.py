@@ -22,10 +22,15 @@ ACTIONS = {
     "confirm_alias": "Confirm the vendor's new name, then recheck.",
     "enter_missing": "Correct the missing detail, then recheck.",
     "retry_source": "Recheck once the data source is back.",
+    "check_provider": "Find this reference in Razorpay before doing anything else. It may already be issued.",
+    "sign_again": "Recheck this invoice, then sign it again.",
+    "change_request": "This is held by your instruction. Start a new run to change it.",
 }
 # The check that matters most decides which actions may be recommended.
-POLICY = [("bank", ["call_vendor", "reject"]), ("sender", ["call_vendor", "reject"]), ("bank_request", ["call_vendor", "reject"]),
-          ("gstin", ["reject", "call_vendor"]), ("ifsc", ["call_vendor", "retry_source", "reject"]), ("duplicate", ["reject"]),
+POLICY = [("payment_conflict", ["check_provider"]), ("master_changed", ["sign_again", "reject"]),
+          ("bank", ["call_vendor", "reject"]), ("sender", ["call_vendor", "reject"]), ("bank_request", ["call_vendor", "reject"]),
+          ("buyer", ["reject", "call_vendor"]), ("instruction", ["change_request"]), ("invoice_date", ["call_vendor", "reject"]),
+          ("einvoice", ["call_vendor", "reject"]), ("gstin", ["reject", "call_vendor"]), ("ifsc", ["call_vendor", "retry_source", "reject"]), ("duplicate", ["reject"]),
           ("document", ["enter_missing", "reject"]), ("required", ["enter_missing", "reject"]), ("vendor", ["enter_missing", "reject"]),
           ("near_duplicate", ["reject", "call_vendor"]), ("po", ["amend_po", "reject"]), ("gst", ["retain_gst_and_pay", "call_vendor"]),
           ("company", ["confirm_alias", "retry_source", "call_vendor"]), ("tds", ["enter_missing"]), ("payment", ["retry_source", "reject"]), ("internal", ["retry_source"])]

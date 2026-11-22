@@ -18,6 +18,9 @@ All times are IST on 22 November 2026.
 | 11:45 | Re-read the handbook line by line | No request intake, no visible plan, sources that did not open, no ledger view, no bank posting, and a crash could lose unread inputs | Built each one |
 | 11:49 | Payee by company name | "Swiggy" and "Sharma Traders" each match several companies at top confidence | Post only through issued payments or firm rules confirmed by domain |
 | 12:27 | Real payment run | Razorpay throttled the sixth payment for about a minute | Retries safely, and the screen says why it is waiting |
+| 14:54 | Red-team review | A re-presented duplicate could pay twice, and a master or PO could change after signing | Fixed each, with a regression test |
+| 14:54 | Benchmark on 2,994 real Indian companies | 33.2% of 500 sampled names were shared. After tuning, 99.8% of generated lookalikes were blocked and 14 of 300,000 honest pairs were wrongly blocked | Never identify a payee by name alone |
+| 15:12 | Browser click-through of the rebuilt UI | Approving a held invoice did not prove which evidence the reviewer had seen | Approvals now carry the evidence hash and fail if it changed |
 
 ## Approaches weighed
 

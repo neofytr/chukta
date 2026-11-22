@@ -766,4 +766,7 @@ def down(text):
 
 assert read_invoice(invoice(), down)["amount_paise"] == 11800000, "falls back to the parser"
 
+from chukta.desk import HARD_STOPS
+from chukta.investigator import ACTIONS, POLICY
+assert set(HARD_STOPS) <= {c for c, _ in POLICY} and all(a in ACTIONS for _, acts in POLICY for a in acts), "every hard stop needs its own advice"
 print("all checks passed")

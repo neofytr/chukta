@@ -9,7 +9,7 @@ Re-read against the ContextCon 05 Builder Handbook on 22 November 2026.
 | At least one decision rests on live data | Met | Crustdata Identify and the IFSC registry decide the company and bank checks |
 | Each claim links to its record, field and date | Met | Open any line under Evidence |
 | "I can't verify" names what is missing | Met | Unknown vendors, held bank lines, source outages |
-| A person approves what cannot be taken back | Met | Press-and-hold sign-off, named rejection |
+| A person approves what cannot be taken back | Met | Press-and-hold sign-off, named rejection, two named people for a bank change. Names are typed, with no login |
 | Payments run in a provider's test mode | Met | Razorpay Payment Links. The app refuses live keys |
 | Each run has a time limit and a credit limit | Met | Today, "This run's ceiling" |
 | Every call is in a ledger, model calls included | Met | Ledger |
