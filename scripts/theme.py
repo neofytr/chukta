@@ -94,7 +94,7 @@ def main():
                 worst = min(worst, contrast(r[fg], r[bg]))
             body = ";".join(f"--md-{k.replace('_', '-')}:{v}" for k, v in r.items())
             mode = "dark" if dark else "light"
-            prefix = ":root," if name == "forest" and not dark else ""
+            prefix = ":root," if name == "bay" and not dark else ""
             css.append(f'{prefix}:root[data-seed="{name}"][data-mode="{mode}"]{{{body};color-scheme:{mode}}}')
     out = pathlib.Path(__file__).parent.parent / "static" / "theme.css"
     out.parent.mkdir(exist_ok=True)

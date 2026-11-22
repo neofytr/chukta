@@ -2,6 +2,7 @@
 import csv
 import io
 import json
+import re
 
 from .desk import _mask, _rupees, decide, event_hash, evidence_hash, now
 from .records import mask_text
@@ -83,14 +84,23 @@ def verify_audit(db, client_id):
 def replay_lines(db, client_id):
     """One row per signed payment, so a reviewer can watch the books replay."""
     problems = verify_audit(db, client_id)
-    rows = []
-    for o in db.execute("SELECT o.*, i.state, i.fields, i.payment_ref FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE o.client_id=? "
+    rows, sections = [], {}
+    totals = {"gross": 0, "tds": 0, "retained": 0, "net": 0}
+    for o in db.execute("SELECT o.*, i.state, i.fields, i.payment_ref, i.due_date FROM payment_orders o JOIN invoices i ON i.id=o.invoice_id WHERE o.client_id=? "
                         "ORDER BY o.invoice_id", (client_id,)).fetchall():
         own = [p for p in problems if p.startswith(f"Invoice {o['invoice_id']}:")]
         rows.append({"id": o["invoice_id"], "number": json.loads(o["fields"]).get("invoice_no"), "payee": o["payee_name"], "gross": _rupees(o["gross_paise"]),
                      "tds": _rupees(o["tds_paise"]), "retained": _rupees(o["retained_gst_paise"]), "net": _rupees(o["net_paise"]), "signed_by": o["approved_by"],
-                     "reference": o["payment_ref"], "state": o["state"], "ok": not own, "problems": own})
-    return {"lines": rows, "problems": problems, "ok": not problems}
+                     "reference": o["payment_ref"], "state": o["state"], "ok": not own, "problems": own, "account": _mask(o["account"]), "ifsc": o["ifsc"], "due": o["due_date"]})
+        for key, column in (("gross", "gross_paise"), ("tds", "tds_paise"), ("retained", "retained_gst_paise"), ("net", "net_paise")):
+            totals[key] += o[column]
+        if o["tds_paise"]:
+            found = db.execute("SELECT detail FROM findings WHERE invoice_id=? AND check_name='tds'", (o["invoice_id"],)).fetchone()
+            entry = re.search(r"(s\.393\(1\) Table \S+?)[.:]?(?:\s|$)", found[0]) if found else None
+            label = entry.group(1) if entry and _rupees(o["tds_paise"]) in found[0] else "Entered by the reviewer"
+            sections[label] = sections.get(label, 0) + o["tds_paise"]
+    return {"lines": rows, "problems": problems, "ok": not problems, "totals": {k: _rupees(v) for k, v in totals.items()},
+            "tds_by_section": [{"section": k, "amount": _rupees(v)} for k, v in sorted(sections.items())]}
 
 
 def audit_file(db, client_id):

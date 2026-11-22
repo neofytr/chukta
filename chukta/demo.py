@@ -3,6 +3,7 @@
 Vendor names and domains are real so the live company check has something to check.
 Every invoice, GSTIN, bank account and amount here is invented.
 """
+from .reader import ReaderDown, read_invoice
 import json
 
 from .desk import _rupees, add_client, add_po, add_vendor, gstin_check, import_gstr2b
@@ -114,3 +115,32 @@ def seed(db):
     import_gstr2b(db, CLIENT, october_2b())
     for keyword, legal, domain, account in PAYEE_RULES:
         add_payee_rule(db, CLIENT, keyword, legal, domain, account)
+
+
+# Recorded source answers, for offline evaluation and the break-it drills. No network, no credits.
+KNOWN = {"moglix.com": "Moglix", "safexpress.com": "Safexpress Private Limited", "zoho.com": "Zoho", "tciexpress.in": "TCI Express Ltd.",
+         "gati.com": "Allcargo Logistics", "swiggy.com": "Swiggy", "google.com": "Google"}
+
+
+def recorded(method, url, headers, body, timeout=20):
+    if "ifsc" in url:
+        return 200, {}, b'{"BANK":"Recorded Bank","BRANCH":"Recorded Branch"}'
+    ask = json.loads(body)
+    if url.endswith("/company/search"):
+        rows = [{"crustdata_company_id": i, "basic_info": {"status": "active"}, "metadata": {"updated_at": "2026-11-20T00:00:00Z"}} for i in ask["filters"]["value"]]
+        return 200, {"x-credits-used": str(0.03 * len(rows))}, json.dumps({"companies": rows}).encode()
+    if "names" in ask:
+        same = [{"confidence_score": 1, "company_data": {"crustdata_company_id": n, "basic_info": {"name": "Sharma Traders", "primary_domain": None}}} for n in range(3)]
+        return 200, {"x-credits-used": "0.2"}, json.dumps([{"matched_on": n, "match_type": "name", "matches": same} for n in ask["names"]]).encode()
+    rows = [{"matched_on": d, "match_type": "domain", "matches": [{"confidence_score": 1, "company_data": {
+        "crustdata_company_id": 1, "basic_info": {"name": KNOWN[d], "primary_domain": d}}}] if d in KNOWN else []}
+        for d in json.loads(body)["domains"]]
+    return 200, {"x-credits-used": str(0.2 * sum(bool(r["matches"]) for r in rows))}, json.dumps(rows).encode()
+
+
+def recorded_read(text):
+    def reply(_):
+        if "bhaiya" in text:
+            return MESSY_READING, {}
+        raise ReaderDown("offline")
+    return read_invoice(text, reply)

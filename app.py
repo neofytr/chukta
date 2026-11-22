@@ -12,10 +12,12 @@ import sys
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from chukta.books import books_payload, import_2b, import_pos, import_vendors
 from chukta.demo import BATCH, CLIENT, CLIENT_NAME, SAMPLE_REQUEST, SAMPLE_STATEMENT, seed
+from chukta.drills import run_drills
 from chukta.desk import (HARD_STOPS, SandboxBank, _paise, _rupees, add_alias, approve, approve_bank_change, compute_tds, evidence_hash, connect, ingest, now, parse, pay_approved, process,
                          propose_bank_change, recheck, reject)
 from chukta.exports import audit_file, bank_file, replay_lines, tally_vouchers, verify_audit
@@ -33,6 +35,7 @@ DB = str(ROOT / "chukta.db")
 PORT = int(os.environ.get("CHUKTA_PORT", 8765))
 PAY_DELAY_S = float(os.environ.get("CHUKTA_PAY_DELAY", 0))  # Set to 3 to make a kill during payment easy to show.
 MAX_BODY = 1_000_000
+MODEL_WORKERS = 4
 JOB = {"running": False, "name": "", "message": "", "error": ""}
 JOB_LOCK = threading.Lock()
 ORDER = {"BLOCKED": 0, "HELD": 1, "NEW": 2, "READY": 3, "APPROVED": 4, "PAID": 5, "REJECTED": 6}
@@ -81,31 +84,47 @@ def _no_model(messages, use_tools):
 
 
 def run_batch(run_id):
-    """Each stage is safe to repeat, so a restart simply calls this again."""
+    """Each stage is safe to repeat, so a restart simply calls this again. Model calls overlap, decisions stay in order."""
     db = connect(DB)
-    run = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    run = dict(db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())
     deadline = time.monotonic() + run["time_limit_s"]
-    within = lambda: time.monotonic() < deadline and model_spend(db, run_id) < run["model_usd_limit"]
-    read_with_model = logged_reader(db, run_id)
-    read = lambda text: read_with_model(text) if within() else parse(text) | {"reader_notes": ["Run ceiling reached. Used the rule-based parser only."], "usage": None}
-    pending = db.execute("SELECT n, text FROM run_inputs WHERE run_id=? AND done=0 ORDER BY n", (run_id,)).fetchall()
+    within = lambda conn: time.monotonic() < deadline and model_spend(conn, run_id) < run["model_usd_limit"]
+
+    def read_one(row):
+        own = connect(DB)  # SQLite connections stay on one thread.
+        try:
+            if within(own):
+                return logged_reader(own, run_id)(row["text"])
+            return parse(row["text"]) | {"reader_notes": ["Run ceiling reached. Used the rule-based parser only."], "usage": None}
+        finally:
+            own.close()
+
+    def look_into(invoice_id):
+        own = connect(DB)
+        try:
+            investigate(own, invoice_id, run_id, model_chat if within(own) else _no_model)
+        finally:
+            own.close()
+
+    pending = [dict(r) for r in db.execute("SELECT n, text FROM run_inputs WHERE run_id=? AND done=0 ORDER BY n", (run_id,))]
     total = db.execute("SELECT COUNT(*) FROM run_inputs WHERE run_id=?", (run_id,)).fetchone()[0]
     set_stage(db, run_id, "reading")
-    for row in pending:
-        JOB["message"] = f"Reading invoice {row['n'] + 1} of {total}"
-        ingest(db, CLIENT, row["text"], read)
-        with db:
-            db.execute("UPDATE run_inputs SET done=1 WHERE run_id=? AND n=?", (run_id, row["n"]))
+    with ThreadPoolExecutor(MODEL_WORKERS) as pool:  # map keeps input order, so duplicates and TDS totals resolve the same way.
+        for done, (row, fields) in enumerate(zip(pending, pool.map(read_one, pending)), total - len(pending) + 1):
+            JOB["message"] = f"Reading invoice {done} of {total}"
+            ingest(db, CLIENT, row["text"], lambda _: fields)
+            with db:
+                db.execute("UPDATE run_inputs SET done=1 WHERE run_id=? AND n=?", (run_id, row["n"]))
     set_stage(db, run_id, "checking")
     apply_instructions(db, run)
     JOB["message"] = "Checking each invoice against independent records"
     process(db, Sources(db, run_id, credit_limit=run["credit_limit"], time_limit_s=run["time_limit_s"]))
     set_stage(db, run_id, "investigating")
-    todo = db.execute("SELECT id FROM invoices i WHERE state IN ('HELD','BLOCKED') AND NOT EXISTS "
-                      "(SELECT 1 FROM investigations n WHERE n.invoice_id=i.id)").fetchall()
-    for n, row in enumerate(todo, 1):
-        JOB["message"] = f"Investigating exception {n} of {len(todo)}"
-        investigate(db, row[0], run_id, model_chat if within() else _no_model)
+    todo = [r[0] for r in db.execute("SELECT id FROM invoices i WHERE state IN ('HELD','BLOCKED') AND NOT EXISTS "
+                                     "(SELECT 1 FROM investigations n WHERE n.invoice_id=i.id)")]
+    with ThreadPoolExecutor(MODEL_WORKERS) as pool:
+        for n, _ in enumerate(pool.map(look_into, todo), 1):
+            JOB["message"] = f"Looking into exception {n} of {len(todo)}"
     set_stage(db, run_id, "review")
     close_finished_runs(db)
     db.close()
@@ -194,11 +213,11 @@ def state_payload(db):
             totals["tds"] += tds or 0
             totals["retained"] += r["order_retained"] or 0
             totals["net"] += net
-        reason = db.execute("SELECT detail FROM findings WHERE invoice_id=? AND status NOT IN ('pass','info') "
+        reason = db.execute("SELECT detail, check_name FROM findings WHERE invoice_id=? AND status NOT IN ('pass','info') "
                             "ORDER BY severity='block' DESC LIMIT 1", (r["id"],)).fetchone()
         out.append({"id": r["id"], "number": f.get("invoice_no") or "No number", "vendor": r["vendor_name"] or "Unknown vendor", "date": r["invoice_date"],
                     "state": r["state"], "gross": _rupees(r["amount_paise"]) if r["amount_paise"] else "Unclear", "net": _rupees(net) if net else "",
-                    "due": r["due_date"], "reason": reason[0] if reason else "", "action": r["action_text"] or ""})
+                    "due": r["due_date"], "reason": reason[0] if reason else "", "check": reason[1] if reason else "", "action": r["action_text"] or ""})
     out.sort(key=lambda x: (ORDER.get(x["state"], 9), x["due"] or "9999", x["id"]))
     run_lines.sort(key=lambda x: (x["due"] or "9999", x["id"]))
     counts = {s: sum(1 for x in out if x["state"] == s) for s in ORDER}
@@ -256,7 +275,9 @@ def font_css():
     font = STATIC / "GoogleSansFlex.woff2"
     if not font.exists():
         return b""
-    return b'@font-face{font-family:"Google Sans Flex";src:url(/static/GoogleSansFlex.woff2) format("woff2");font-weight:100 1000;font-display:swap}'
+    return (b'@font-face{font-family:"Google Sans Flex";src:url(/static/GoogleSansFlex.woff2) format("woff2");font-weight:300 800;font-stretch:87% 112%;font-display:swap}'
+            b'@font-face{font-family:"Google Sans Flex";src:url(/static/GoogleSansFlex-Rupee.woff2) format("woff2");font-weight:300 800;font-stretch:87% 112%;font-display:swap;unicode-range:U+20B9}'
+            b'@font-face{font-family:"Material Symbols";src:url(/static/MaterialSymbols.woff2) format("woff2");font-weight:300 600;font-display:block}')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -356,6 +377,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route(self, db, body):
         path = self.path
+        if path == "/api/drills":
+            return run_drills()
         if path == "/api/run":
             if JOB["running"]:
                 raise ValueError("Chukta is already working")
@@ -454,11 +477,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)  # Bound first, so a second copy exits before touching the books.
     if "--reset" in sys.argv:
         for suffix in ("", "-wal", "-shm", ".paylock"):
             pathlib.Path(DB + suffix).unlink(missing_ok=True)
     (ROOT / "chukta.pid").write_text(str(os.getpid()))  # Lets a demo kill exactly this process.
     resumed = resume()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Chukta is running on http://127.0.0.1:{PORT}" + (" and resuming interrupted work" if resumed else ""), flush=True)
     server.serve_forever()
