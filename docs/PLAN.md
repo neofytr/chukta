@@ -2,6 +2,35 @@
 
 Theme 6.1, The Payables Desk. Solo build. Code freeze 6:00 PM IST, 22 Nov 2026.
 
+## 0. Problem Statement update (read 10:50 AM). This overrides the sections below where they differ
+
+**Binding changes**
+
+- **One fictional client for all teams:** a mid-size Indian 3PL logistics company. Its name, records and requests come from the kickoff kit. Its counterparties are real companies. The CA-firm framing below is no longer the demo client.
+- **Hidden test set:** organizers run the service on unseen requests, using the kit's input and output formats. A wrong answer costs more than "cannot verify".
+- **Track scope:** pay each invoice exactly once through crashes and bank-detail fraud, and **reconcile or post bank-statement lines** (payee, account, duplicate hold, cannot verify).
+- **Payments must run in a provider's test mode** such as Razorpay or Stripe. The local sandbox is a risk.
+- **Requirement change at hour 3**, around 1:15 PM. Organizers may also change client records during the build.
+- **Screening:** organizers stop and restart the service and inspect README, architecture diagram, logs, cost records and repo history.
+- **Finals (100):** live run 20, robustness 15, design 15, ethics 25, financial feasibility 25. Includes a kill on stage, a 5-minute live fix and one system design question, in a 12-minute slot.
+- **README must state:** the job and who pays today, input, finished result, pass mark, and each data source. The architecture diagram must live in the repo and show data calls, approvals, retries and the cost ledger.
+
+**Conflicts with the handbook, to confirm with organizers**
+
+| Topic | Handbook | Problem Statement |
+| - | - | - |
+| Repo | New public repo | Organizer repo received at kickoff |
+| Scoring | Five criteria, execution 25 | Five different areas, ethics and finance 25 each |
+| Finals slot | 2-minute demo, 1 minute of questions | 12-minute slot with live fix |
+
+**Revised order, once the kit arrives**
+
+1. Adapter for the kit's input and output formats, and a restartable runner.
+2. Bank-line posting and payee resolution, with a real source per payee.
+3. Provider test-mode payments.
+4. Measured cost per job, and the ethics story: personal data, approvals, explanations.
+5. Domain extras only if the kit's requests need them. TDS, MSME and GSTR-2B are paused until then.
+
 ## 1. The service
 
 **Who pays today:** small and mid-size Indian businesses pay CA and outsourced accounting firms to run their payables.

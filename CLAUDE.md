@@ -2,6 +2,10 @@
 
 ContextCon 05 build, theme 6.1 (Buying and paying). Takes a week's invoices and pays each one once, to the right account, holding anything unusual for a person with the reason. Plan: `docs/PLAN.md`.
 
+## Read first
+
+`docs/PLAN.md` section 0 holds the Problem Statement, which overrides older plan sections. All teams serve one fictional 3PL client from the kickoff kit, and hidden test cases are run at screening.
+
 ## Hard rules from the handbook
 
 - Code freeze is **6:00 PM IST, 22 Nov 2026**. Repo must be public, with history starting after 10:15 AM.
