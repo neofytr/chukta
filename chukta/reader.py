@@ -1,7 +1,6 @@
 """LLM reader. The model proposes fields, and code accepts a value only if the invoice text supports it."""
 import http.client
 import json
-import pathlib
 import re
 import time
 import urllib.error
@@ -9,6 +8,7 @@ import urllib.request
 from decimal import Decimal, InvalidOperation
 
 from .desk import _date, norm_po, now, parse
+from .sources import load_env
 
 MODEL = "deepseek/deepseek-v4.1-flash"
 USD_PER_TOKEN = {"prompt": 0.30e-6, "completion": 1.20e-6}  # From GET /models, 22 Nov 2026.
@@ -24,7 +24,9 @@ class ReaderDown(Exception):
 
 
 def chat(text, timeout=30):
-    env = dict(l.split("=", 1) for l in (pathlib.Path(__file__).parent.parent / ".env").read_text().splitlines() if "=" in l)
+    env = load_env()
+    if not env.get("LLM_API_KEY") or not env.get("LLM_BASE_URL"):
+        raise ReaderDown("no model key configured")
     body = json.dumps({"model": MODEL, "temperature": 0, "max_tokens": 600, "chat_template_kwargs": {"thinking": False},
                        "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": SYSTEM},

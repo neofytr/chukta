@@ -27,6 +27,12 @@ The LLM (`LLM_BASE_URL`, model `deepseek/deepseek-v4.1-flash`) is on a free key 
 
 - `chukta/sources.py`: live data, with throttling, retries, cache and ledger
 - `chukta/desk.py`: parsing, checks, decisions, approval, payment
+- `chukta/reader.py`: model reader, verified by code
+- `chukta/investigator.py`: read-only exception agent
+- `chukta/razorpay.py`: test-mode payments, refuses live keys
+- `chukta/exports.py`: bank file, Tally vouchers, audit replay
+- `chukta/demo.py` and `eval.py`: labelled fictional batch and scoring
+- `app.py` and `ui.html`: reviewer app
 - `test_chukta.py`: offline self-check. Run `python3 test_chukta.py` before saying anything works
 - `docs/crustdata/pages/`: full local API docs. Index: `docs/crustdata/llms.txt`
 - `docs/crustdata/account-endpoints.json`: this key's real limits and prices

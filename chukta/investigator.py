@@ -5,7 +5,6 @@ recommended action. If any check fails, the reviewer gets the rule-based explana
 """
 import http.client
 import json
-import pathlib
 import re
 import time
 import urllib.error
@@ -13,6 +12,7 @@ import urllib.request
 
 from .desk import _mask, _rupees, evidence_hash, now
 from .reader import MODEL, USD_PER_TOKEN
+from .sources import load_env
 
 ACTIONS = {
     "call_vendor": "Call the vendor on a number already on file before doing anything else.",
@@ -47,7 +47,9 @@ class ModelDown(Exception):
 
 
 def model_chat(messages, use_tools):
-    env = dict(l.split("=", 1) for l in (pathlib.Path(__file__).parent.parent / ".env").read_text().splitlines() if "=" in l)
+    env = load_env()
+    if not env.get("LLM_API_KEY") or not env.get("LLM_BASE_URL"):
+        raise ModelDown()
     payload = {"model": MODEL, "temperature": 0, "max_tokens": 700, "chat_template_kwargs": {"thinking": False}, "messages": messages}
     if use_tools:
         payload["tools"] = SPECS

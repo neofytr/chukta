@@ -1,0 +1,105 @@
+# Chukta
+
+**Chukta (चुकता, "paid in full") is a payables desk for CA firms.** It takes a client's week of invoices, checks each one against records the sender does not control, drafts TDS, and prepares a payment run a reviewer can sign. Each approved invoice is issued once, even if the process is killed mid-payment.
+
+ContextCon 05, BITS Pilani. Theme 6.1, The Payables Desk.
+
+## The service
+
+**Who does this today:** CA firms and outsourced accounting teams, paid by small and mid-size businesses to match invoices, verify vendors, deduct TDS and release payments.
+
+**Why it matters:** duplicates and bank-detail fraud are the expensive failures. A [Pune company lost ₹10.45 lakh](https://the420.in/?p=87114) after a supplier's domain was changed from `.com` to `.cam`, and a [Vadodara business lost ₹19.75 lakh](https://the420.in/vadodara-businessman-duped-fake-supplier-email-fraud/) to a fake supplier email.
+
+**The idea:** an invoice is never evidence for itself.
+
+| What the invoice claims | Record that must agree |
+| - | - |
+| "This invoice was issued" | The client's GSTR-2B, for closed periods |
+| "Pay this account" | The vendor master, never the invoice |
+| "You ordered this" | The client's PO and its remaining balance |
+| "This bank branch exists" | The live IFSC registry |
+| "We are this company" | Crustdata's company record for the vendor's known domain |
+
+## What it does now
+
+1. Reads messy invoices and emails. A model proposes fields, and code accepts each only if the source text supports it.
+2. Runs 15 checks and decides **Ready**, **Held** or **Blocked** using fixed policy.
+3. Catches reformatted duplicates, bank changes, lookalike domains, PO overspend, GST credit at risk and renamed vendors.
+4. Drafts TDS under section 393 and orders payment by MSME deadline.
+5. An investigator agent explains each exception using read-only tools. Code verifies its citations and numbers.
+6. A named reviewer signs, which freezes the payee and amount.
+7. Issues payments in Razorpay test mode, then produces a bank file, Tally vouchers and a replayable audit file.
+
+**Where it still needs a person:** every payment sign-off, every rejection, every exception, and every vendor master change.
+
+## Run it
+
+Needs Python 3.12. There is nothing to install.
+
+```bash
+git clone https://github.com/neofytr/chukta && cd chukta
+python3 test_chukta.py    # offline self-check
+python3 eval.py           # labelled batch, offline
+python3 app.py --reset    # http://127.0.0.1:8765
+```
+
+For live data, run `cp .env.example .env` and fill it in, then `python3 eval.py --live`. Without keys, Chukta still runs, uses a local sandbox, and holds what it cannot verify. Use fictional data only on a free model key.
+
+To show a crash, start with `CHUKTA_PAY_DELAY=3 python3 app.py --reset`, release payments, run `pkill -9 -f "python3 app.py"`, then start `python3 app.py`.
+
+## How it's built
+
+The diagram, component boundaries and failure table are in [docs/architecture.md](docs/architecture.md). It uses Python's standard library, SQLite in WAL mode and one HTML page. Models: DeepSeek V4.1 Flash as reader and investigator, with no route to approval or payment.
+
+## Sources and checks
+
+| Source | Used for | Live? |
+| - | - | - |
+| Crustdata `/company/identify` | Vendor domain to company record | Yes |
+| [Razorpay IFSC API](https://ifsc.razorpay.com/) | Bank branch exists | Yes |
+| Razorpay Payment Links, test mode | One payment request per vendor invoice | Yes |
+| GSTR-2B JSON | Supplier filed this invoice | Client file |
+| Vendor master and POs | Payee, order and balance | Client records |
+
+**Person approves:** every payment, rejection, held invoice and vendor alias.
+
+**Ledger:** every Crustdata, IFSC and model call is recorded with its cost, and each run has a credit and time ceiling.
+
+## How we know it works
+
+| Test | Result |
+| - | - |
+| Labelled batch on live sources (`eval.py --live`) | 12 of 12 decisions correct |
+| Paid to a wrong account | 0 |
+| `kill -9` during payment on the real app, Razorpay test mode | 6 invoices, 6 payments |
+| Regression checks (`test_chukta.py`) | All pass, including each bug an independent critic reproduced |
+| Prompt injection in an invoice | No effect on the decision |
+
+The 12 cases are fictional and were written by us before the run, so they show the behavior but not real-world accuracy. Build notes, including what failed, are in [NOTES.md](NOTES.md).
+
+## Business case
+
+- **Buyer:** a CA firm running payables for many SME clients.
+- **Proposed price:** ₹40 per invoice, a hypothesis to test with firms. Indian benchmarks for manual or outsourced processing run from roughly [₹60 to ₹150](https://tallysolutions.com/accounting/the-roi-of-accounts-payable-automation-calculating-the-cost-of-a-manual-invoice/) up to [₹250](https://www.incorpx.io/accounts-payable-services), mostly from vendor sources.
+- **Measured cost of a 12-invoice run:** 1 Crustdata credit and about $0.01 of model calls. Half went straight through, and six needed a reviewer. Company lookups are cached, so repeat vendors cost less.
+
+## Who it could get wrong
+
+- **An honest small vendor unknown to data sources.** It gets "I can't verify", never a fraud label. Established vendors are not held for this alone.
+- **A vendor paid late because of a hold.** MSME deadlines are shown and paid first.
+- **Personal data.** Accounts are masked on screen, and the investigator never sees raw invoice text.
+
+## Left out, and why
+
+- **Settlement to vendors.** Payment Links are Razorpay test-mode payment requests. Real vendor payouts need RazorpayX and a firm's approval.
+- **OCR for scanned invoices.** Text and email came first.
+- **Live GSTIN status.** We found no free official API and did not scrape the portal.
+- **Binding tax advice.** TDS is a draft for the reviewer. Rates came from official Income Tax pages, but a CA must confirm each case.
+
+## What comes next
+
+RazorpayX payouts with webhook confirmation, OCR, direct Tally sync, and vendor callback tracking. These wait until a real firm validates the workflow, because each depends on that firm's bank and books.
+
+## The future of this service
+
+Once agents can do the whole job, a CA firm's payables work shifts from preparing entries to reviewing exceptions. The trust layer then becomes the product: evidence for each payment, and a record that survives an audit.

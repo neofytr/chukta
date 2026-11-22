@@ -28,9 +28,18 @@ class InvalidDomains(Exception):
         self.domains = domains
 
 
-def load_keys(path=pathlib.Path(__file__).parent.parent / ".env"):
+def load_env(path=pathlib.Path(__file__).parent.parent / ".env"):
+    """Empty without a .env, so a fresh clone holds invoices for a person instead of crashing."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return {}
+    return dict(l.split("=", 1) for l in lines if "=" in l and not l.lstrip().startswith("#"))
+
+
+def load_keys():
     """Primary key first. Each spare is used only after the one before it returns 402."""
-    env = dict(l.split("=", 1) for l in path.read_text().splitlines() if "=" in l)
+    env = load_env()
     names = ("CRUSTDATA_API_KEY", "CRUSTDATA_API_KEY_FALLBACK", "CRUSTDATA_API_KEY_FALLBACK_2")
     return [env[k] for k in names if env.get(k)]
 

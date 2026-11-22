@@ -9,11 +9,10 @@ import base64
 import hashlib
 import http.client
 import json
-import pathlib
 import time
 
 from .desk import PaymentConflict, PaymentRejected, PaymentUnavailable, now
-from .sources import http_call
+from .sources import http_call, load_env
 
 API = "https://api.razorpay.com"
 PACE_S = 1.5  # Razorpay returned 429 on a burst of about ten calls. Tune here if the account's limit differs.
@@ -22,7 +21,7 @@ PACE_S = 1.5  # Razorpay returned 429 on a burst of about ten calls. Tune here i
 class RazorpayBank:
     def __init__(self, db, key=None, secret=None, transport=http_call, sleep=time.sleep):
         if key is None:
-            env = dict(l.split("=", 1) for l in (pathlib.Path(__file__).parent.parent / ".env").read_text().splitlines() if "=" in l)
+            env = load_env()
             key, secret = env.get("RAZORPAY_KEY_ID", ""), env.get("RAZORPAY_KEY_SECRET", "")
         if not key.startswith("rzp_test_") or not secret:
             raise ValueError("Chukta runs only on Razorpay test keys")

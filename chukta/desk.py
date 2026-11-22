@@ -616,7 +616,7 @@ def _check_company(add, src, vendor):
     if (m.get("confidence") or 0) < MIN_MATCH_CONFIDENCE:
         add("company", "unverified", f"I can't verify the company: the match for {real} is low confidence.", cite, got["retrieved_at"])
     elif any(same_company(n, m["name"]) for n in names):
-        add("company", "pass", f"{real} resolves to {m['name']}.", cite, got["retrieved_at"])
+        add("company", "pass", f"{real} resolves to {m['name'].rstrip('.')}.", cite, got["retrieved_at"])
     else:
         add("company", "unverified", f"I can't verify the company: {real} resolves to {m['name']}, but the master says {vendor['name']}.",
             cite, got["retrieved_at"])
