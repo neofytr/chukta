@@ -32,10 +32,11 @@ class InvalidDomains(Exception):
 def load_env(path=pathlib.Path(__file__).parent.parent / ".env"):
     """Empty without a .env, so a fresh clone holds invoices for a person instead of crashing."""
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()  # Notepad may add a byte-order mark.
     except OSError:
         return {}
-    return dict(l.split("=", 1) for l in lines if "=" in l and not l.lstrip().startswith("#"))
+    pairs = (l.split("=", 1) for l in lines if "=" in l and not l.lstrip().startswith("#"))
+    return {k.strip(): v.strip().strip("\"'") for k, v in pairs}
 
 
 def load_keys():

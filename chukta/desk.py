@@ -4,7 +4,11 @@ Decisions are fixed policy over evidence. No model output can move money.
 State: NEW -> READY | HELD | BLOCKED -> APPROVED -> PAID, or -> REJECTED.
 """
 import contextlib
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows.
+    fcntl = None
+    import msvcrt
 import hashlib
 import json
 import re
@@ -993,8 +997,21 @@ def _pay_lock(db):
         yield
         return
     with open(path + ".paylock", "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
+        if fcntl:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+            return
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def pay_approved(db, bank):
